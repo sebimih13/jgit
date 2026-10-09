@@ -56,6 +56,7 @@ import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Checkout a branch to the working tree.
@@ -168,6 +169,22 @@ public class CheckoutCommand extends GitCommand<Ref> {
 
 	@Override
 	public Ref call() throws GitAPIException, RefAlreadyExistsException,
+			RefNotFoundException, InvalidRefNameException,
+			CheckoutConflictException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"checkout", "jgit.api.CheckoutCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Ref result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Ref callWithTrace() throws GitAPIException, RefAlreadyExistsException,
 			RefNotFoundException, InvalidRefNameException,
 			CheckoutConflictException {
 		checkCallable();

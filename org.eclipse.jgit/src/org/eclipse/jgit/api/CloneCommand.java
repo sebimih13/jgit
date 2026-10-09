@@ -50,6 +50,7 @@ import org.eclipse.jgit.transport.TagOpt;
 import org.eclipse.jgit.transport.URIish;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FileUtils;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Clone a repository into a new working directory
@@ -173,6 +174,21 @@ public class CloneCommand extends TransportCommand<CloneCommand, Git> {
 	 */
 	@Override
 	public Git call() throws GitAPIException, InvalidRemoteException,
+			org.eclipse.jgit.api.errors.TransportException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"clone", "jgit.api.CloneCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Git result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Git callWithTrace() throws GitAPIException, InvalidRemoteException,
 			org.eclipse.jgit.api.errors.TransportException {
 		URIish u = null;
 		try {

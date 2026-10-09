@@ -29,6 +29,7 @@ import org.eclipse.jgit.storage.file.FileBasedConfig;
 import org.eclipse.jgit.submodule.SubmoduleWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilter;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a submodule add command.
@@ -139,6 +140,20 @@ public class SubmoduleAddCommand extends
 	 */
 	@Override
 	public Repository call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"submodule", "jgit.api.SubmoduleAddCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Repository result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Repository callWithTrace() throws GitAPIException {
 		checkCallable();
 		if (path == null || path.length() == 0)
 			throw new IllegalArgumentException(JGitText.get().pathNotConfigured);

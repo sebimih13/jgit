@@ -26,6 +26,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FileUtils;
 import org.eclipse.jgit.util.Paths;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Remove untracked files from the working tree
@@ -66,6 +67,20 @@ public class CleanCommand extends GitCommand<Set<String>> {
 	 */
 	@Override
 	public Set<String> call() throws NoWorkTreeException, GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"clean", "jgit.api.CleanCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Set<String> result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Set<String> callWithTrace() throws NoWorkTreeException, GitAPIException {
 		Set<String> files = new TreeSet<>();
 		try {
 			StatusCommand command = new StatusCommand(repo);

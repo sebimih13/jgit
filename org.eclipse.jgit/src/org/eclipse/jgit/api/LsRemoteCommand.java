@@ -33,6 +33,7 @@ import org.eclipse.jgit.transport.Transport;
 import org.eclipse.jgit.transport.URIish;
 import org.eclipse.jgit.transport.UrlConfig;
 import org.eclipse.jgit.util.SystemReader;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * The ls-remote command
@@ -150,6 +151,22 @@ public class LsRemoteCommand extends
 	}
 
 	private Map<String, Ref> execute() throws GitAPIException,
+			InvalidRemoteException,
+			org.eclipse.jgit.api.errors.TransportException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"ls-remote", "jgit.api.LsRemoteCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Map<String, Ref> result = executeWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Map<String, Ref> executeWithTrace() throws GitAPIException,
 			InvalidRemoteException,
 			org.eclipse.jgit.api.errors.TransportException {
 		checkCallable();

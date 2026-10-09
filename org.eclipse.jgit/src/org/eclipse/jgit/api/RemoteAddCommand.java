@@ -20,6 +20,7 @@ import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.RemoteConfig;
 import org.eclipse.jgit.transport.URIish;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Used to add a new remote.
@@ -82,6 +83,20 @@ public class RemoteAddCommand extends GitCommand<RemoteConfig> {
 	 */
 	@Override
 	public RemoteConfig call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"remote", "jgit.api.RemoteAddCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				RemoteConfig result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private RemoteConfig callWithTrace() throws GitAPIException {
 		checkCallable();
 
 		try {

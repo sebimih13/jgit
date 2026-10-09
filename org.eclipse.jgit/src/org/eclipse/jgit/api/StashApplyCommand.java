@@ -53,6 +53,7 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.TreeWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Command class to apply a stashed commit.
@@ -143,6 +144,22 @@ public class StashApplyCommand extends GitCommand<ObjectId> {
 	 */
 	@Override
 	public ObjectId call() throws GitAPIException,
+			WrongRepositoryStateException, NoHeadException,
+			StashApplyFailureException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"stash", "jgit.api.StashApplyCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				ObjectId result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private ObjectId callWithTrace() throws GitAPIException,
 			WrongRepositoryStateException, NoHeadException,
 			StashApplyFailureException {
 		checkCallable();

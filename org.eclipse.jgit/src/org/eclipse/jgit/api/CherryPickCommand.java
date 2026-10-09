@@ -53,6 +53,7 @@ import org.eclipse.jgit.merge.ResolveMerger.MergeFailureReason;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code cherry-pick} command. It has setters for all
@@ -105,6 +106,22 @@ public class CherryPickCommand extends GitCommand<CherryPickResult> {
 	 */
 	@Override
 	public CherryPickResult call() throws GitAPIException, NoMessageException,
+			UnmergedPathsException, ConcurrentRefUpdateException,
+			WrongRepositoryStateException, NoHeadException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"cherry-pick", "jgit.api.CherryPickCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				CherryPickResult result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private CherryPickResult callWithTrace() throws GitAPIException, NoMessageException,
 			UnmergedPathsException, ConcurrentRefUpdateException,
 			WrongRepositoryStateException, NoHeadException {
 		RevCommit newHead = null;

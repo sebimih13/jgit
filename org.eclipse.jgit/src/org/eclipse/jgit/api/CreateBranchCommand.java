@@ -33,6 +33,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Used to create a local branch.
@@ -84,6 +85,21 @@ public class CreateBranchCommand extends GitCommand<Ref> {
 
 	@Override
 	public Ref call() throws GitAPIException, RefAlreadyExistsException,
+			RefNotFoundException, InvalidRefNameException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"branch", "jgit.api.CreateBranchCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Ref result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Ref callWithTrace() throws GitAPIException, RefAlreadyExistsException,
 			RefNotFoundException, InvalidRefNameException {
 		checkCallable();
 		processOptions();

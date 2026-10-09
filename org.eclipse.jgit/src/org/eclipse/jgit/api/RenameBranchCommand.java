@@ -30,6 +30,7 @@ import org.eclipse.jgit.lib.RefRename;
 import org.eclipse.jgit.lib.RefUpdate.Result;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Used to rename branches.
@@ -57,6 +58,21 @@ public class RenameBranchCommand extends GitCommand<Ref> {
 
 	@Override
 	public Ref call() throws GitAPIException, RefNotFoundException, InvalidRefNameException,
+			RefAlreadyExistsException, DetachedHeadException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"branch", "jgit.api.RenameBranchCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Ref result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Ref callWithTrace() throws GitAPIException, RefNotFoundException, InvalidRefNameException,
 			RefAlreadyExistsException, DetachedHeadException {
 		checkCallable();
 

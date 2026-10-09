@@ -24,6 +24,7 @@ import org.eclipse.jgit.submodule.SubmoduleWalk.IgnoreSubmoduleMode;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.WorkingTreeIterator;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Status} command. It has setters for all
@@ -109,6 +110,23 @@ public class StatusCommand extends GitCommand<Status> {
 	 */
 	@Override
 	public Status call() throws GitAPIException, NoWorkTreeException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo, "status", //$NON-NLS-1$
+				"jgit.api.StatusCommand")) { //$NON-NLS-1$
+			try {
+				Status result = callWithTrace();
+				if (trace.isEnabled()) {
+					trace.data("outcome", progressMonitor != null //$NON-NLS-1$
+							&& progressMonitor.isCancelled() ? "cancelled" : "ok"); //$NON-NLS-1$ //$NON-NLS-2$
+				}
+				return result;
+			} catch (GitAPIException | RuntimeException e) {
+				trace.data("outcome", "error"); //$NON-NLS-1$ //$NON-NLS-2$
+				throw e;
+			}
+		}
+	}
+
+	private Status callWithTrace() throws GitAPIException, NoWorkTreeException {
 		if (workingTreeIt == null)
 			workingTreeIt = new FileTreeIterator(repo);
 

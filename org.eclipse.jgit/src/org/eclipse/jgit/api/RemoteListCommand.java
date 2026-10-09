@@ -16,6 +16,7 @@ import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.transport.RemoteConfig;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Used to obtain the list of remotes.
@@ -50,6 +51,20 @@ public class RemoteListCommand extends GitCommand<List<RemoteConfig>> {
 	 */
 	@Override
 	public List<RemoteConfig> call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"remote", "jgit.api.RemoteListCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				List<RemoteConfig> result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private List<RemoteConfig> callWithTrace() throws GitAPIException {
 		checkCallable();
 
 		try {

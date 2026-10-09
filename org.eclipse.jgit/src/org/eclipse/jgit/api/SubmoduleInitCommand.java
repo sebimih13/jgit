@@ -22,6 +22,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.submodule.SubmoduleWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a submodule init command.
@@ -63,6 +64,20 @@ public class SubmoduleInitCommand extends GitCommand<Collection<String>> {
 
 	@Override
 	public Collection<String> call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"submodule", "jgit.api.SubmoduleInitCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Collection<String> result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Collection<String> callWithTrace() throws GitAPIException {
 		checkCallable();
 
 		try (SubmoduleWalk generator = SubmoduleWalk.forIndex(repo)) {

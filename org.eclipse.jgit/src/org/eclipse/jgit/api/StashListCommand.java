@@ -25,6 +25,7 @@ import org.eclipse.jgit.lib.ReflogEntry;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Command class to list the stashed commits in a repository.
@@ -45,6 +46,21 @@ public class StashListCommand extends GitCommand<Collection<RevCommit>> {
 
 	@Override
 	public Collection<RevCommit> call() throws GitAPIException,
+			InvalidRefNameException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"stash", "jgit.api.StashListCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Collection<RevCommit> result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Collection<RevCommit> callWithTrace() throws GitAPIException,
 			InvalidRefNameException {
 		checkCallable();
 

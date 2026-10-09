@@ -38,6 +38,7 @@ import org.eclipse.jgit.treewalk.filter.PathFilter;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.eclipse.jgit.util.FileUtils;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a submodule deinit command.
@@ -78,6 +79,20 @@ public class SubmoduleDeinitCommand
 	 */
 	@Override
 	public Collection<SubmoduleDeinitResult> call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"submodule", "jgit.api.SubmoduleDeinitCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Collection<SubmoduleDeinitResult> result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Collection<SubmoduleDeinitResult> callWithTrace() throws GitAPIException {
 		checkCallable();
 		try {
 			if (paths.isEmpty()) {

@@ -49,6 +49,7 @@ import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
 import org.eclipse.jgit.treewalk.filter.IndexDiffFilter;
 import org.eclipse.jgit.treewalk.filter.SkipWorkTreeFilter;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Compares the index, a tree, and the working directory Ignored files are not
@@ -457,7 +458,30 @@ public class IndexDiff {
 	public boolean diff(ProgressMonitor monitor, int estWorkTreeSize,
 			int estIndexSize, String title, RepositoryBuilderFactory factory)
 			throws IOException {
-		dirCache = repository.readDirCache();
+		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
+				"index", "diff")) { //$NON-NLS-1$ //$NON-NLS-2$
+			try {
+				boolean result = diffWithTrace(monitor, estWorkTreeSize,
+						estIndexSize, title, factory);
+				if (trace.isEnabled()) {
+					trace.data("outcome", monitor != null && monitor.isCancelled() //$NON-NLS-1$
+							? "cancelled" : "ok"); //$NON-NLS-1$ //$NON-NLS-2$
+				}
+				return result;
+			} catch (IOException | RuntimeException e) {
+				trace.data("outcome", "error"); //$NON-NLS-1$ //$NON-NLS-2$
+				throw e;
+			}
+		}
+	}
+
+	private boolean diffWithTrace(ProgressMonitor monitor, int estWorkTreeSize,
+			int estIndexSize, String title, RepositoryBuilderFactory factory)
+			throws IOException {
+		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
+				"index", "read")) { //$NON-NLS-1$ //$NON-NLS-2$
+			dirCache = repository.readDirCache();
+		}
 
 		try (TreeWalk treeWalk = new TreeWalk(repository)) {
 			treeWalk.setOperationType(OperationType.CHECKIN_OP);

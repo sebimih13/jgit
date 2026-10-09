@@ -50,6 +50,7 @@ import org.eclipse.jgit.merge.ResolveMerger.MergeFailureReason;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code revert} command. It has setters for all
@@ -102,6 +103,22 @@ public class RevertCommand extends GitCommand<RevCommit> {
 	 */
 	@Override
 	public RevCommit call() throws NoMessageException, UnmergedPathsException,
+			ConcurrentRefUpdateException, WrongRepositoryStateException,
+			GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"revert", "jgit.api.RevertCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				RevCommit result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private RevCommit callWithTrace() throws NoMessageException, UnmergedPathsException,
 			ConcurrentRefUpdateException, WrongRepositoryStateException,
 			GitAPIException {
 		RevCommit newHead = null;

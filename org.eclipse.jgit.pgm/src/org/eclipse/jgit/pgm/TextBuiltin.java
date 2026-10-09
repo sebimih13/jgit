@@ -39,6 +39,7 @@ import org.eclipse.jgit.transport.SshSessionFactory;
 import org.eclipse.jgit.transport.sshd.DefaultProxyDataFactory;
 import org.eclipse.jgit.transport.sshd.JGitKeyCache;
 import org.eclipse.jgit.transport.sshd.SshdSessionFactory;
+import org.eclipse.jgit.util.Trace2;
 import org.eclipse.jgit.util.io.ThrowingPrintWriter;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.Option;
@@ -209,6 +210,14 @@ public abstract class TextBuiltin {
 	 *             standard error.
 	 */
 	public final void execute(String[] args) throws Exception {
+		try (Trace2.Scope trace = Trace2.getInstance().command(db,
+				commandName != null ? commandName : "jgit", //$NON-NLS-1$
+				"jgit.pgm.TextBuiltin")) { //$NON-NLS-1$
+			executeWithTrace(args);
+		}
+	}
+
+	private void executeWithTrace(String[] args) throws Exception {
 		parseArguments(args);
 		SshdSessionFactory factory = new SshdSessionFactory(new JGitKeyCache(),
 				new DefaultProxyDataFactory());

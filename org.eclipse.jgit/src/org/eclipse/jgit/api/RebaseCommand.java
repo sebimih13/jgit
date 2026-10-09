@@ -85,6 +85,7 @@ import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.eclipse.jgit.util.FileUtils;
 import org.eclipse.jgit.util.IO;
 import org.eclipse.jgit.util.RawParseUtils;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Rebase} command. It has setters for all
@@ -252,6 +253,21 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 	 */
 	@Override
 	public RebaseResult call() throws GitAPIException, NoHeadException,
+			RefNotFoundException, WrongRepositoryStateException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"rebase", "jgit.api.RebaseCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				RebaseResult result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private RebaseResult callWithTrace() throws GitAPIException, NoHeadException,
 			RefNotFoundException, WrongRepositoryStateException {
 		newHead = null;
 		lastStepWasForward = false;

@@ -19,6 +19,7 @@ import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Optimize storage of references.
@@ -76,6 +77,20 @@ public class PackRefsCommand extends GitCommand<String> {
 
 	@Override
 	public String call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"pack-refs", "jgit.api.PackRefsCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				String result = callWithTrace();
+				returned = true;
+				return result;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private String callWithTrace() throws GitAPIException {
 		checkCallable();
 		try {
 			repo.getRefDatabase().packRefs(monitor, this);
