@@ -2130,6 +2130,9 @@ public abstract class FS {
 			InterruptedException {
 		ExecutorService executor = Executors.newFixedThreadPool(2);
 		Process process = null;
+		Trace2 tracer = Trace2.peekInstance();
+		Trace2.Child child = tracer != null && tracer.isEnabled()
+				? tracer.childStart(processBuilder) : null;
 		// We'll record the first I/O exception that occurs, but keep on trying
 		// to dispose of our open streams and file handles
 		IOException ioException = null;
@@ -2157,9 +2160,12 @@ public abstract class FS {
 					// IOException in StreamGobbler, we also ignore the exception here.
 				}
 			}
-			return process.waitFor();
+			int code = process.waitFor();
+			if (child != null) { child.exit(process.pid(), code); }
+			return code;
 		} catch (IOException e) {
 			ioException = e;
+			if (child != null && process == null) { child.exit(-1, -1); }
 		} finally {
 			shutdownAndAwaitTermination(executor);
 			if (process != null) {
@@ -2171,6 +2177,12 @@ public abstract class FS {
 					// interrupted flag (processes throw the exception without
 					// clearing the flag).
 					Thread.interrupted();
+				}
+				if (child != null) {
+					try { child.exit(process.pid(), process.exitValue()); }
+					catch (IllegalThreadStateException stillRunning) {
+						// Preserve interrupted-process cleanup; no invented exit status.
+					}
 				}
 				// A process doesn't clean its own resources even when destroyed
 				// Explicitly try and close all three streams, preserving the

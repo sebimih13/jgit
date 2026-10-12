@@ -46,6 +46,7 @@ import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
 import org.eclipse.jgit.treewalk.filter.IndexDiffFilter;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Add} command. It has setters for all
@@ -175,6 +176,23 @@ public class AddCommand extends GitCommand<DirCache> {
 	 */
 	@Override
 	public DirCache call() throws GitAPIException, NoFilepatternException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"add", "jgit.api.AddCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				DirCache result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private DirCache callWithTrace() throws GitAPIException, NoFilepatternException {
 		checkCallable();
 
 		if (update && all != null) {

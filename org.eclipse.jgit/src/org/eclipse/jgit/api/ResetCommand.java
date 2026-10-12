@@ -39,6 +39,7 @@ import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.EmptyTreeIterator;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Reset} command. It has setters for all
@@ -117,6 +118,23 @@ public class ResetCommand extends GitCommand<Ref> {
 	 */
 	@Override
 	public Ref call() throws GitAPIException, CheckoutConflictException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"reset", "jgit.api.ResetCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Ref result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Ref callWithTrace() throws GitAPIException, CheckoutConflictException {
 		checkCallable();
 
 		try {

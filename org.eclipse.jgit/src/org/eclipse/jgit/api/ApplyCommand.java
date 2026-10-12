@@ -22,6 +22,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.patch.Patch;
 import org.eclipse.jgit.patch.PatchApplier;
 import org.eclipse.jgit.patch.PatchApplier.Result;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Apply a patch to files and/or to the index.
@@ -72,6 +73,23 @@ public class ApplyCommand extends GitCommand<ApplyResult> {
 	 */
 	@Override
 	public ApplyResult call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"apply", "jgit.api.ApplyCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				ApplyResult result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private ApplyResult callWithTrace() throws GitAPIException {
 		checkCallable();
 		setCallable(false);
 		Patch patch = new Patch();

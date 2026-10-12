@@ -31,6 +31,7 @@ import org.eclipse.jgit.lib.SignatureVerifier.SignatureVerification;
 import org.eclipse.jgit.lib.SignatureVerifiers;
 import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A command to verify GPG signatures on tags or commits.
@@ -170,6 +171,24 @@ public class VerifySignatureCommand extends GitCommand<Map<String, VerificationR
 	@Override
 	@NonNull
 	public Map<String, VerificationResult> call()
+			throws ServiceUnavailableException, WrongObjectTypeException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"jgit-verify-signature", "jgit.api.VerifySignatureCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Map<String, VerificationResult> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Map<String, VerificationResult> callWithTrace()
 			throws ServiceUnavailableException, WrongObjectTypeException {
 		checkCallable();
 		setCallable(false);

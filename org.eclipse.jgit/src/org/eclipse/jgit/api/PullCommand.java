@@ -54,6 +54,7 @@ import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.transport.FetchResult;
 import org.eclipse.jgit.transport.TagOpt;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * The Pull command
@@ -187,6 +188,27 @@ public class PullCommand extends TransportCommand<PullCommand, PullResult> {
 	 */
 	@Override
 	public PullResult call() throws GitAPIException,
+			WrongRepositoryStateException, InvalidConfigurationException,
+			InvalidRemoteException, CanceledException,
+			RefNotFoundException, RefNotAdvertisedException, NoHeadException,
+			org.eclipse.jgit.api.errors.TransportException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"pull", "jgit.api.PullCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				PullResult result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private PullResult callWithTrace() throws GitAPIException,
 			WrongRepositoryStateException, InvalidConfigurationException,
 			InvalidRemoteException, CanceledException,
 			RefNotFoundException, RefNotAdvertisedException, NoHeadException,

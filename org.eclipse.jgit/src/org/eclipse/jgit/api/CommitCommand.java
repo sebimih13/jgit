@@ -71,6 +71,7 @@ import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.TreeWalk.OperationType;
 import org.eclipse.jgit.util.ChangeIdUtil;
+import org.eclipse.jgit.util.Trace2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -165,6 +166,26 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 */
 	@Override
 	public RevCommit call() throws GitAPIException, AbortedByHookException,
+			ConcurrentRefUpdateException, NoHeadException, NoMessageException,
+			ServiceUnavailableException, UnmergedPathsException,
+			WrongRepositoryStateException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"commit", "jgit.api.CommitCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				RevCommit result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private RevCommit callWithTrace() throws GitAPIException, AbortedByHookException,
 			ConcurrentRefUpdateException, NoHeadException, NoMessageException,
 			ServiceUnavailableException, UnmergedPathsException,
 			WrongRepositoryStateException {

@@ -27,6 +27,7 @@ import org.eclipse.jgit.lib.RepositoryBuilder;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.StringUtils;
 import org.eclipse.jgit.util.SystemReader;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Create an empty git repository or reinitalize an existing one
@@ -57,6 +58,23 @@ public class InitCommand implements Callable<Git> {
 	 */
 	@Override
 	public Git call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(null,
+				"init", "jgit.api.InitCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Git result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Git callWithTrace() throws GitAPIException {
 		try {
 			RepositoryBuilder builder = new RepositoryBuilder();
 			if (bare)

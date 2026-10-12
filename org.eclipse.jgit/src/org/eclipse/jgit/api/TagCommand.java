@@ -36,6 +36,7 @@ import org.eclipse.jgit.lib.TagBuilder;
 import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.transport.CredentialsProvider;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Create/update an annotated tag object or a simple unannotated tag
@@ -104,6 +105,24 @@ public class TagCommand extends GitCommand<Ref> {
 	 */
 	@Override
 	public Ref call() throws GitAPIException, ConcurrentRefUpdateException,
+			InvalidTagNameException, NoHeadException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"tag", "jgit.api.TagCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Ref result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Ref callWithTrace() throws GitAPIException, ConcurrentRefUpdateException,
 			InvalidTagNameException, NoHeadException {
 		checkCallable();
 		processOptions();

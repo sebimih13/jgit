@@ -11,10 +11,12 @@ package org.eclipse.jgit.api;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.util.Collection;
+import java.util.Map;
 import java.util.Optional;
 
 import org.eclipse.jgit.junit.RepositoryTestCase;
@@ -47,6 +49,16 @@ public class LsRemoteCommandTest extends RepositoryTestCase {
 		git.tag().setName("tag1").call();
 		git.tag().setName("tag2").call();
 		git.tag().setName("tag3").call();
+	}
+
+	@Test
+	public void testLsRemoteAsMapWithoutLocalRepository() throws Exception {
+		Map<String, Ref> refs = Git.lsRemoteRepository().setRemote(fileUri())
+				.setHeads(true).callAsMap();
+		assertEquals(2, refs.size());
+		assertEquals(db.resolve("refs/heads/test"),
+				refs.get("refs/heads/test").getObjectId());
+		assertThrows(UnsupportedOperationException.class, refs::clear);
 	}
 
 	@Test

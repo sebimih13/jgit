@@ -28,6 +28,7 @@ import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Remove files from the index and working directory (or optionally only from
@@ -112,6 +113,24 @@ public class RmCommand extends GitCommand<DirCache> {
 	 */
 	@Override
 	public DirCache call() throws GitAPIException,
+			NoFilepatternException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"rm", "jgit.api.RmCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				DirCache result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private DirCache callWithTrace() throws GitAPIException,
 			NoFilepatternException {
 
 		if (filepatterns.isEmpty())

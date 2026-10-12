@@ -23,6 +23,7 @@ import org.eclipse.jgit.diff.RawTextComparator;
 import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Blame command for building a {@link org.eclipse.jgit.blame.BlameResult} for a
@@ -181,6 +182,23 @@ public class BlameCommand extends GitCommand<BlameResult> {
 	 */
 	@Override
 	public BlameResult call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"blame", "jgit.api.BlameCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				BlameResult result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private BlameResult callWithTrace() throws GitAPIException {
 		checkCallable();
 		try (BlameGenerator gen = new BlameGenerator(repo, path)) {
 			if (diffAlgorithm != null)

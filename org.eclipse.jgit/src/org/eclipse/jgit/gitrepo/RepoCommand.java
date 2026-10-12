@@ -22,6 +22,7 @@ import java.util.Objects;
 import java.util.StringJoiner;
 import java.util.TreeMap;
 
+import org.eclipse.jgit.util.Trace2;
 import org.eclipse.jgit.annotations.NonNull;
 import org.eclipse.jgit.annotations.Nullable;
 import org.eclipse.jgit.api.Git;
@@ -54,25 +55,34 @@ import org.eclipse.jgit.util.FileUtils;
  * of the repository with the contents populated from the manifest.
  *
  * repo manifest allows projects overlapping, e.g. one project's manifestPath is
- * &quot;foo&quot; and another project's manifestPath is &quot;foo/bar&quot;. This won't
- * work in git submodule, so we'll skip all the sub projects
+ * &quot;foo&quot; and another project's manifestPath is &quot;foo/bar&quot;.
+ * This won't work in git submodule, so we'll skip all the sub projects
  * (&quot;foo/bar&quot; in the example) while converting.
  *
- * @see <a href="https://gerrit.googlesource.com/git-repo/">git-repo project page</a>
+ * @see <a href="https://gerrit.googlesource.com/git-repo/">git-repo project
+ *      page</a>
  * @since 3.4
  */
 public class RepoCommand extends GitCommand<RevCommit> {
 
-
 	private String manifestPath;
+
 	private String baseUri;
+
 	private URI targetUri;
+
 	private String groupsParam;
+
 	private String branch;
+
 	private String targetBranch = Constants.HEAD;
+
 	private PersonIdent author;
+
 	private RemoteReader callback;
+
 	private InputStream inputStream;
+
 	private IncludedFileReader includedReader;
 
 	private BareSuperprojectWriter.BareWriterConfig bareWriterConfig = BareSuperprojectWriter.BareWriterConfig
@@ -85,8 +95,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	/**
 	 * A callback to get ref sha1 of a repository from its uri.
 	 *
-	 * We provided a default implementation {@link DefaultRemoteReader} to
-	 * use ls-remote command to read the sha1 from the repository and clone the
+	 * We provided a default implementation {@link DefaultRemoteReader} to use
+	 * ls-remote command to read the sha1 from the repository and clone the
 	 * repository to read the file. Callers may have their own quicker
 	 * implementation.
 	 *
@@ -191,9 +201,7 @@ public class RepoCommand extends GitCommand<RevCommit> {
 
 		@Override
 		public ObjectId sha1(String uri, String ref) throws GitAPIException {
-			Map<String, Ref> map = Git
-					.lsRemoteRepository()
-					.setRemote(uri)
+			Map<String, Ref> map = Git.lsRemoteRepository().setRemote(uri)
 					.callAsMap();
 			Ref r = RefDatabase.findRef(map, ref);
 			return r != null ? r.getObjectId() : null;
@@ -237,7 +245,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	@SuppressWarnings("serial")
 	static class RemoteUnavailableException extends GitAPIException {
 		RemoteUnavailableException(String uri) {
-			super(MessageFormat.format(RepoText.get().errorRemoteUnavailable, uri));
+			super(MessageFormat.format(RepoText.get().errorRemoteUnavailable,
+					uri));
 		}
 	}
 
@@ -271,7 +280,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	 * Setting inputStream will ignore the path set. It will be closed in
 	 * {@link #call}.
 	 *
-	 * @param inputStream a {@link java.io.InputStream} object.
+	 * @param inputStream
+	 *            a {@link java.io.InputStream} object.
 	 * @return this command
 	 * @since 3.5
 	 */
@@ -317,7 +327,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	/**
 	 * Set groups to sync
 	 *
-	 * @param groups groups separated by comma, examples: default|all|G1,-G2,-G3
+	 * @param groups
+	 *            groups separated by comma, examples: default|all|G1,-G2,-G3
 	 * @return this command
 	 */
 	public RepoCommand setGroups(String groups) {
@@ -363,19 +374,20 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	/**
 	 * Set whether the branch name should be recorded in .gitmodules.
 	 * <p>
-	 * Submodule entries in .gitmodules can include a "branch" field
-	 * to indicate what remote branch each submodule tracks.
+	 * Submodule entries in .gitmodules can include a "branch" field to indicate
+	 * what remote branch each submodule tracks.
 	 * <p>
-	 * That field is used by "git submodule update --remote" to update
-	 * to the tip of the tracked branch when asked and by Gerrit to
-	 * update the superproject when a change on that branch is merged.
+	 * That field is used by "git submodule update --remote" to update to the
+	 * tip of the tracked branch when asked and by Gerrit to update the
+	 * superproject when a change on that branch is merged.
 	 * <p>
-	 * Subprojects that request a specific commit or tag will not have
-	 * a branch name recorded.
+	 * Subprojects that request a specific commit or tag will not have a branch
+	 * name recorded.
 	 * <p>
 	 * Not implemented for non-bare repositories.
 	 *
-	 * @param enable Whether to record the branch name
+	 * @param enable
+	 *            Whether to record the branch name
 	 * @return this command
 	 * @since 4.2
 	 */
@@ -390,7 +402,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	 * <p>
 	 * Not implemented for non-bare repositories.
 	 *
-	 * @param enable Whether to record the labels in the .gitattributes
+	 * @param enable
+	 *            Whether to record the labels in the .gitattributes
 	 * @return this command
 	 * @since 4.4
 	 */
@@ -405,7 +418,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	 * <p>
 	 * Not implemented for non-bare repositories.
 	 *
-	 * @param enable Whether to record the shallow recommendation.
+	 * @param enable
+	 *            Whether to record the shallow recommendation.
 	 * @return this command
 	 * @since 4.4
 	 */
@@ -431,15 +445,16 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	/**
 	 * Set whether to skip projects whose commits don't exist remotely.
 	 * <p>
-	 * When set to true, we'll just skip the manifest entry and continue
-	 * on to the next one.
+	 * When set to true, we'll just skip the manifest entry and continue on to
+	 * the next one.
 	 * <p>
-	 * When set to false (default), we'll throw an error when remote
-	 * failures occur.
+	 * When set to false (default), we'll throw an error when remote failures
+	 * occur.
 	 * <p>
 	 * Not implemented for non-bare repositories.
 	 *
-	 * @param ignore Whether to ignore the remote failures.
+	 * @param ignore
+	 *            Whether to ignore the remote failures.
 	 * @return this command
 	 * @since 4.3
 	 */
@@ -511,6 +526,18 @@ public class RepoCommand extends GitCommand<RevCommit> {
 
 	@Override
 	public RevCommit call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo, "repo", //$NON-NLS-1$
+				"jgit.gitrepo.RepoCommand")) { //$NON-NLS-1$
+			try {
+				return callWithTrace();
+			} catch (GitAPIException | RuntimeException | Error failure) {
+				trace.failure(failure);
+				throw failure;
+			}
+		}
+	}
+
+	private RevCommit callWithTrace() throws GitAPIException {
 		checkCallable();
 		if (baseUri == null) {
 			baseUri = ""; //$NON-NLS-1$
@@ -544,17 +571,18 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		}
 
 		if (repo.isBare()) {
-			List<RepoProject> renamedProjects = renameProjects(filteredProjects);
-			BareSuperprojectWriter writer = new BareSuperprojectWriter(repo, targetUri,
-					targetBranch,
+			List<RepoProject> renamedProjects = renameProjects(
+					filteredProjects);
+			BareSuperprojectWriter writer = new BareSuperprojectWriter(repo,
+					targetUri, targetBranch,
 					author == null ? new PersonIdent(repo) : author,
 					callback == null ? new DefaultRemoteReader() : callback,
 					bareWriterConfig, extraContents);
 			return writer.write(renamedProjects);
 		}
 
-
-		RegularSuperprojectWriter writer = new RegularSuperprojectWriter(repo, monitor);
+		RegularSuperprojectWriter writer = new RegularSuperprojectWriter(repo,
+				monitor);
 		return writer.write(filteredProjects);
 	}
 
@@ -584,9 +612,9 @@ public class RepoCommand extends GitCommand<RevCommit> {
 				if (nameConflict) {
 					name += SLASH + proj.getPath();
 				}
-				RepoProject p = new RepoProject(name,
-						proj.getPath(), proj.getRevision(), null,
-						proj.getGroups(), proj.getRecommendShallow());
+				RepoProject p = new RepoProject(name, proj.getPath(),
+						proj.getRevision(), null, proj.getGroups(),
+						proj.getRecommendShallow());
 				p.setUrl(proj.getUrl());
 				p.addCopyFiles(proj.getCopyFiles());
 				p.addLinkFiles(proj.getLinkFiles());
@@ -599,11 +627,13 @@ public class RepoCommand extends GitCommand<RevCommit> {
 	}
 
 	/*
-	 * Assume we are document "a/b/index.html", what should we put in a href to get to "a/" ?
-	 * Returns the child if either base or child is not a bare path. This provides a missing feature in
-	 * java.net.URI (see http://bugs.java.com/view_bug.do?bug_id=6226081).
+	 * Assume we are document "a/b/index.html", what should we put in a href to
+	 * get to "a/" ? Returns the child if either base or child is not a bare
+	 * path. This provides a missing feature in java.net.URI (see
+	 * http://bugs.java.com/view_bug.do?bug_id=6226081).
 	 */
 	private static final String SLASH = "/"; //$NON-NLS-1$
+
 	static URI relativize(URI current, URI target) {
 		if (!Objects.equals(current.getHost(), target.getHost())) {
 			return target;
@@ -648,7 +678,8 @@ public class RepoCommand extends GitCommand<RevCommit> {
 		String[] ds = dest.split(SLASH);
 
 		int common = 0;
-		while (common < cs.length && common < ds.length && cs[common].equals(ds[common])) {
+		while (common < cs.length && common < ds.length
+				&& cs[common].equals(ds[common])) {
 			common++;
 		}
 

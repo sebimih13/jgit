@@ -59,6 +59,7 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.RevWalkUtils;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.util.StringUtils;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Merge} command. It has setters for all
@@ -220,6 +221,25 @@ public class MergeCommand extends GitCommand<MergeResult> {
 	@Override
 	@SuppressWarnings("boxing")
 	public MergeResult call() throws GitAPIException, NoHeadException,
+			ConcurrentRefUpdateException, CheckoutConflictException,
+			InvalidMergeHeadsException, WrongRepositoryStateException, NoMessageException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"merge", "jgit.api.MergeCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				MergeResult result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private MergeResult callWithTrace() throws GitAPIException, NoHeadException,
 			ConcurrentRefUpdateException, CheckoutConflictException,
 			InvalidMergeHeadsException, WrongRepositoryStateException, NoMessageException {
 		checkCallable();
