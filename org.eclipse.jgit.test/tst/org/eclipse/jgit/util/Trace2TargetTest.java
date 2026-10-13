@@ -27,6 +27,26 @@ import org.eclipse.jgit.internal.trace2.Trace2Target.Format;
 import org.junit.Test;
 
 public class Trace2TargetTest {
+	@Test
+	public void hookIdentityIsIncludedInEventAndPerfTargets() {
+		StringWriter event = new StringWriter();
+		StringWriter normal = new StringWriter();
+		StringWriter perf = new StringWriter();
+		try (Trace2 trace = new Trace2(List.of(target(event, Format.EVENT, 10),
+				target(normal, Format.NORMAL, 10), target(perf, Format.PERF, 10)),
+				"parent", List.of("jgit", "commit"))) {
+			ProcessBuilder builder = new ProcessBuilder("sh", "hook");
+			try (Trace2.Scope scope = trace.hook(null, "pre-commit", builder)) {
+				trace.childStart(builder).exit(42, 7);
+			}
+		}
+		assertTrue(event.toString().contains("\"hook_name\":\"pre-commit\""));
+		assertTrue(perf.toString().contains("[ch0] class:hook hook:pre-commit argv:[sh hook]"));
+		assertTrue(perf.toString().contains("label:pre-commit"));
+		assertTrue(normal.toString().contains("child_start[0] sh hook"));
+		assertFalse(normal.toString().contains("hook:pre-commit"));
+	}
+
 	private static Trace2Target target(StringWriter writer, Format format,
 			int nesting) {
 		return new Trace2Target(new Trace2Destination(writer, false, false),

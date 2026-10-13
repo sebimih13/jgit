@@ -349,6 +349,15 @@ public final class Trace2 implements AutoCloseable {
 		return scope;
 	}
 
+	/* Bind hook identity to this builder, preserving FS.runProcess dispatch. */
+	Scope hook(Repository repository, String name, ProcessBuilder builder) {
+		Scope scope = region(repository, "hook", name); //$NON-NLS-1$
+		if (scope.isEnabled()) {
+			scope.hookProcess = builder;
+		}
+		return scope;
+	}
+
 	private synchronized int repositoryId(Repository repository) {
 		if (repository == null) {
 			return 0;
@@ -507,6 +516,11 @@ public final class Trace2 implements AutoCloseable {
 	 */
 	public Child childStart(String childClass, String directory,
 			boolean useShell, String... argv) {
+		return childStart(childClass, null, directory, useShell, argv);
+	}
+
+	private Child childStart(String childClass, String hookName,
+			String directory, boolean useShell, String... argv) {
 		if (!enabled) {
 			return new Child(null, 0);
 		}
@@ -516,6 +530,9 @@ public final class Trace2 implements AutoCloseable {
 				Boolean.valueOf(useShell), "argv", redactArguments(argv));
 		if (directory != null) {
 			f.put("cd", directory); //$NON-NLS-1$
+		}
+		if (hookName != null) {
+			f.put("hook_name", hookName); //$NON-NLS-1$
 		}
 		emit("child_start", f); //$NON-NLS-1$
 		return child;
@@ -534,8 +551,16 @@ public final class Trace2 implements AutoCloseable {
 		}
 		builder.environment().put("GIT_TRACE2_PARENT_SID", sid); //$NON-NLS-1$
 		File directory = builder.directory();
-		return childStart("?", //$NON-NLS-1$
-				directory == null ? null : directory.getAbsolutePath(), false, builder.command().toArray(new String[0]));
+		String hookName = null;
+		for (Scope scope = current.get(); scope != null; scope = scope.parent) {
+			if (scope.hookProcess == builder) {
+				hookName = scope.label;
+				break;
+			}
+		}
+		return childStart(hookName == null ? "?" : "hook", hookName, //$NON-NLS-1$ //$NON-NLS-2$
+				directory == null ? null : directory.getAbsolutePath(),
+				hookName != null, builder.command().toArray(new String[0]));
 	}
 
 	/**
@@ -795,6 +820,8 @@ public final class Trace2 implements AutoCloseable {
 		private boolean closed;
 
 		private boolean command;
+
+		private ProcessBuilder hookProcess;
 
 		private Scope() {
 			trace = null;

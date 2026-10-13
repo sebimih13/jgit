@@ -1954,7 +1954,11 @@ public abstract class FS {
 			environment.put(Constants.GIT_WORK_TREE_KEY,
 					repository.getWorkTree().getAbsolutePath());
 		}
-		try {
+		Trace2 tracer = Trace2.peekInstance();
+		if (tracer == null) {
+			tracer = Trace2.getInstance();
+		}
+		try (Trace2.Scope hook = tracer.hook(repository, hookName, hookProcess)) {
 			return new ProcessResult(runProcess(hookProcess, outRedirect,
 					errRedirect, stdinArgs), Status.OK);
 		} catch (IOException e) {

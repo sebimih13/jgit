@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
 
-import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
@@ -178,15 +177,11 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	@Override
 	public AbstractTreeIterator createSubtreeIterator(ObjectReader reader)
 			throws IncorrectObjectTypeException, IOException {
-		if (!walksIgnoredDirectories() && isEntryIgnored()) {
-			DirCacheIterator iterator = getDirCacheIterator();
-			if (iterator == null) {
-				return new EmptyTreeIterator(this);
-			}
-			// Only enter if we have an associated DirCacheIterator that is
-			// at the same entry (which indicates there is some already
-			// tracked file underneath this directory). Otherwise the
-			// directory is indeed ignored and can be skipped entirely.
+		// An associated index iterator requires traversal regardless of ignore
+		// rules. Resolve that before loading or matching the ignore rules.
+		if (!walksIgnoredDirectories() && getDirCacheIterator() == null
+				&& isEntryIgnored()) {
+			return new EmptyTreeIterator(this);
 		}
 		return enterSubtree();
 	}

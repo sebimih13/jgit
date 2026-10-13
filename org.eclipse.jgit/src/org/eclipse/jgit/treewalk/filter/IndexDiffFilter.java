@@ -113,6 +113,7 @@ public class IndexDiffFilter extends TreeFilter {
 			IncorrectObjectTypeException, IOException {
 		final int cnt = tw.getTreeCount();
 		final int wm = tw.getRawMode(workingTree);
+		final int dm = tw.getRawMode(dirCache);
 		WorkingTreeIterator wi = workingTree(tw);
 		String path = tw.getPathString();
 
@@ -135,12 +136,17 @@ public class IndexDiffFilter extends TreeFilter {
 			// untrackedParentFolders. If we later find tracked files we will
 			// remove it from this list
 			if (FileMode.TREE.equals(wm)
-					&& !(honorIgnores && wi.isEntryIgnored())) {
+					&& (FileMode.TREE.equals(dm)
+							|| !(honorIgnores && wi.isEntryIgnored()))) {
 				// Clean untrackedParentFolders. This potentially moves entries
 				// from untrackedParentFolders to untrackedFolders
 				copyUntrackedFolders(path);
 				// add the folder we just entered to untrackedParentFolders
-				untrackedParentFolders.addFirst(path);
+				// An index directory already has tracked descendants. It cannot
+				// be an untracked folder, irrespective of its ignore rules.
+				if (!FileMode.TREE.equals(dm)) {
+					untrackedParentFolders.addFirst(path);
+				}
 			}
 
 			// detect untracked Folders
@@ -172,7 +178,6 @@ public class IndexDiffFilter extends TreeFilter {
 		// If the path does not appear in the DirCache and its ignored
 		// we can avoid returning a result here, but only if its not in any
 		// other tree.
-		final int dm = tw.getRawMode(dirCache);
 		if (dm == FileMode.TYPE_MISSING) {
 			if (honorIgnores && wi.isEntryIgnored()) {
 				ignoredPaths.add(wi.getEntryPathString());

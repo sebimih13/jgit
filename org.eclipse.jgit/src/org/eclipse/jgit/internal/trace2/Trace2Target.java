@@ -124,6 +124,15 @@ public final class Trace2Target implements AutoCloseable {
 
 	private static String perfPayload(String event, Map<String, Object> f) {
 		switch (event) {
+		case "child_start": //$NON-NLS-1$
+			return "[ch" + f.get("child_id") + "] class:" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+					+ f.get("child_class") //$NON-NLS-1$
+					+ (f.containsKey("hook_name") //$NON-NLS-1$
+							? " hook:" + f.get("hook_name") : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+					+ (f.containsKey("cd") //$NON-NLS-1$
+							? " cd:" + shellQuote(String.valueOf(f.get("cd"))) //$NON-NLS-1$ //$NON-NLS-2$
+							: "") //$NON-NLS-1$
+					+ " argv:[" + argv((Collection<?>) f.get("argv")) + ']'; //$NON-NLS-1$ //$NON-NLS-2$
 		case "version": //$NON-NLS-1$
 			return String.valueOf(f.get("exe")); //$NON-NLS-1$
 		case "start": //$NON-NLS-1$
