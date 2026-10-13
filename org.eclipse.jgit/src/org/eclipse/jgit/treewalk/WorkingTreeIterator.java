@@ -978,8 +978,11 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 					return FileUtils.hasFiles(p);
 				}
 				return false;
-			} else if (mode == FileMode.SYMLINK.getBits())
-				return contentCheck(entry, reader);
+			} else if (mode == FileMode.SYMLINK.getBits()) {
+				// A type change is dirty even when the target bytes match the old blob.
+				return entry.getFileMode() != FileMode.SYMLINK
+						|| contentCheck(entry, reader);
+			}
 			return true;
 		default:
 			throw new IllegalStateException(MessageFormat.format(

@@ -158,12 +158,18 @@ public class FsMonitorTest extends RepositoryTestCase {
 
 	@Test
 	public void timeoutFallsBackWithinDeadline() throws Exception {
-		configure("sleep 60\n");
+		configure("echo $$ > .git/hook-pid\nexec sleep 60\n");
 		try (Git git = new Git(db)) {
 			long start = System.nanoTime();
 			assertTrue(git.status().call().isClean());
 			assertTrue("Hook deadline must bound the call",
 					System.nanoTime() - start < 10_000_000_000L);
+			long pid = Long.parseLong(Files
+					.readString(
+							new File(db.getDirectory(), "hook-pid").toPath())
+					.trim());
+			assertTrue("Timed-out hook must be dead",
+					ProcessHandle.of(pid).map(p -> !p.isAlive()).orElse(true));
 		}
 	}
 
@@ -280,6 +286,949 @@ public class FsMonitorTest extends RepositoryTestCase {
 		} finally {
 			thread.interrupt();
 			thread.join(6000);
+		}
+	}
+
+	@Test
+	public void booleanMonitorValuesNeverExecuteFilesNamedLikeBooleans()
+			throws Exception {
+		configure(null);
+		File marker = new File(db.getDirectory(), "boolean-hook-called");
+		for (String value : new String[] { "false", "FALSE", "0", "no", "off",
+				"true", "TRUE", "1", "yes", "on", "2", "-1", "1k", "0x1", "+1",
+				"010", "0X7f", "0g", "1M", "1G", "-2G", "2147483647",
+				"-2147483648", " 1" }) {
+			File executable = new File(db.getWorkTree(), value);
+			Files.writeString(executable.toPath(),
+					"#!/bin/sh\ntouch '"
+							+ marker.getPath().replace("'", "'\\''")
+							+ "'\nprintf 'token\\0'\n");
+			assertTrue(executable.setExecutable(true));
+			db.getConfig().setString("core", null, "fsmonitor", value);
+			assertNull("Boolean/daemon values cannot name a hook: " + value,
+					new FsMonitor.State().query(db));
+			assertTrue("A boolean value must not execute a file",
+					!marker.exists());
+		}
+	}
+
+	@Test
+	public void includedConfigChangesInvalidateEffectiveStatusInputs()
+			throws Exception {
+		configure(null);
+		File included = new File(db.getDirectory(), "included-config");
+		Files.writeString(included.toPath(), "[core]\nfileMode = true\n");
+		String text = db.getConfig().toText() + "[include]\npath = "
+				+ included.getAbsolutePath() + "\n";
+		db.getConfig().fromText(text);
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("tracked", "body");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			org.junit.Assume.assumeTrue(db.getFS().supportsExecute());
+			assertTrue(db.getFS().setExecute(tracked, true));
+			reply("mode-changed\0tracked\0");
+			Status modeChanged = git.status().call();
+			assertEquals(Set.of("tracked"), modeChanged.getModified());
+			Files.writeString(included.toPath(), "[core]\nfileMode = false\n");
+			db.getConfig().fromText(text);
+			reply("unchanged\0");
+			Status ignoredMode = git.status().call();
+			assertNotSame(modeChanged, ignoredMode);
+			assertTrue(ignoredMode.isClean());
+			equal(baseline(git), ignoredMode);
+		}
+	}
+
+	@Test
+	public void nativeBooleanParsingAndExplicitHookPathsAgree()
+			throws Exception {
+		configure(null);
+		for (String value : new String[] { "false", "true", "0", "-1", "010",
+				"0x1", "1k", "1M", "-2G", "2147483647", "-2147483648", " 1",
+				"./false", "08", "2G", "2147483648", "-2147483649", "#1", "1kk",
+				"1 " }) {
+			Process nativeConfig = new ProcessBuilder("git", "-c",
+					"core.fsmonitor=" + value, "config", "--type=bool", "--get",
+					"core.fsmonitor")
+					.redirectOutput(ProcessBuilder.Redirect.DISCARD)
+					.redirectError(ProcessBuilder.Redirect.DISCARD).start();
+			assertTrue(nativeConfig.waitFor(5,
+					java.util.concurrent.TimeUnit.SECONDS));
+			boolean nativeBoolean = nativeConfig.exitValue() == 0;
+			File executable = new File(db.getWorkTree(), value);
+			Files.writeString(executable.toPath(),
+					"#!/bin/sh\nprintf 'token\\0'\n");
+			assertTrue(executable.setExecutable(true));
+			db.getConfig().setString("core", null, "fsmonitor", value);
+			assertEquals(value, nativeBoolean,
+					new FsMonitor.State().query(db) == null);
+		}
+	}
+
+	@Test
+	public void hookReceivesLiteralOpaqueTokensAndRepositoryWorkingDirectory()
+			throws Exception {
+		configure(
+				"printf '%s\\0%s\\0%s\\0' \"$PWD\" \"$1\" \"$2\" > .git/hook-argv\n"
+						+ "cat .git/monitor-response\n");
+		File original = new File(
+				db.getConfig().getString("core", null, "fsmonitor"));
+		File renamed = new File(original.getParentFile(),
+				"monitor ' with spaces");
+		Files.move(original.toPath(), renamed.toPath());
+		db.getConfig().setString("core", null, "fsmonitor",
+				".git/hooks/" + renamed.getName());
+		String token = "opaque ü; $(touch injected)\n'quote";
+		reply(token + "\0/\0");
+		FsMonitor.State state = new FsMonitor.State();
+		FsMonitor.Probe first = state.query(db);
+		org.junit.Assert.assertNotNull(first);
+		String[] argv = Files
+				.readString(new File(db.getDirectory(), "hook-argv").toPath())
+				.split("\u0000");
+		assertEquals(db.getWorkTree().getCanonicalPath(), argv[0]);
+		assertEquals("2", argv[1]);
+		assertEquals("c:0:0:0:0", argv[2]);
+		state.remember(first);
+		reply("next\0");
+		assertTrue(state.query(db).isUnchanged());
+		argv = Files
+				.readString(new File(db.getDirectory(), "hook-argv").toPath())
+				.split("\u0000");
+		assertEquals(token, argv[2]);
+		assertTrue(!new File(db.getWorkTree(), "injected").exists());
+	}
+
+	@Test
+	public void globalIgnoreContentChangesInvalidateEvenWithRestoredTimestamp()
+			throws Exception {
+		configure(null);
+		File ignore = new File(db.getDirectory(), "global-ignore");
+		Files.writeString(ignore.toPath(), "foo\n");
+		java.nio.file.attribute.FileTime oldTime = Files
+				.getLastModifiedTime(ignore.toPath());
+		db.getConfig().setString("core", null, "excludesFile",
+				ignore.getAbsolutePath());
+		writeTrashFile("foo", "foo");
+		writeTrashFile("bar", "bar");
+		try (Git git = new Git(db)) {
+			Status first = git.status().call();
+			assertEquals(Set.of("foo"), first.getIgnoredNotInIndex());
+			Files.writeString(ignore.toPath(), "bar\n");
+			Files.setLastModifiedTime(ignore.toPath(), oldTime);
+			reply("next\0");
+			Status second = git.status().call();
+			assertNotSame(first, second);
+			assertEquals(Set.of("bar"), second.getIgnoredNotInIndex());
+			assertEquals(Set.of("foo"), second.getUntracked());
+			equal(baseline(git), second);
+		}
+	}
+
+	@Test
+	public void malformedReplyDropsTokenAndRecoveryMustScanBeforeReuse()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			Status first = git.status().call();
+			reply("invalid\0../outside\0");
+			assertNotSame(first, git.status().call());
+			writeTrashFile("new", "new");
+			reply("recovered\0");
+			Status recovered = git.status().call();
+			assertEquals(Set.of("new"), recovered.getUntracked());
+			equal(baseline(git), recovered);
+			reply("stable\0");
+			assertSame(recovered, git.status().call());
+		}
+	}
+
+	@Test
+	public void implicitBooleanAndMultivalueConfigRemainCacheableAndDistinct()
+			throws Exception {
+		configure(null);
+		db.getConfig().fromText(db.getConfig().toText()
+				+ "[benchmark]\nflag\nvalue = first\nvalue\n");
+		FsMonitor.State state = new FsMonitor.State();
+		FsMonitor.Probe initial = state.query(db);
+		org.junit.Assert.assertNotNull(initial);
+		state.remember(initial);
+		reply("next\0");
+		assertTrue(state.query(db).isUnchanged());
+		db.getConfig().setString("benchmark", null, "flag", "");
+		FsMonitor.Probe changed = state.query(db);
+		org.junit.Assert.assertNotNull(changed);
+		org.junit.Assert.assertFalse(changed.isUnchanged());
+		state.remember(changed);
+		assertTrue(state.query(db).isUnchanged());
+	}
+
+	private byte[] nativeGit(File alternateIndex, String... arguments)
+			throws Exception {
+		java.util.List<String> command = new java.util.ArrayList<>(
+				java.util.List.of("git", "--no-optional-locks", "-C",
+						db.getWorkTree().getAbsolutePath(), "-c",
+						"core.fsmonitor=false"));
+		command.addAll(java.util.List.of(arguments));
+		ProcessBuilder builder = new ProcessBuilder(command)
+				.redirectErrorStream(true);
+		builder.environment().keySet()
+				.removeIf(name -> name.startsWith("GIT_"));
+		builder.environment().put("GIT_CONFIG_NOSYSTEM", "1");
+		builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null");
+		if (alternateIndex != null) {
+			builder.environment().put("GIT_INDEX_FILE",
+					alternateIndex.getAbsolutePath());
+		}
+		Process process = builder.start();
+		try {
+			assertTrue("Native Git must finish",
+					process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS));
+			byte[] output = process.getInputStream().readAllBytes();
+			assertEquals(new String(output, StandardCharsets.UTF_8), 0,
+					process.exitValue());
+			return output;
+		} finally {
+			process.destroyForcibly();
+		}
+	}
+
+	private void configureGate() throws Exception {
+		configure("if [ -f .git/gate-enabled ]; then\n"
+				+ "if ! mkdir .git/hook-running; then touch .git/hook-overlap; fi\n"
+				+ "touch .git/hook-ready\n"
+				+ "while [ ! -f .git/hook-release ]; do sleep 0.01; done\n"
+				+ "rmdir .git/hook-running\nfi\ncat .git/monitor-response\n");
+	}
+
+	private void awaitHook() throws Exception {
+		long deadline = System.nanoTime() + 3_000_000_000L;
+		File ready = new File(db.getDirectory(), "hook-ready");
+		while (!ready.isFile() && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertTrue("Hook must reach the gate", ready.isFile());
+	}
+
+	@Test
+	public void concurrentStatusCallsSerializeHookAndReuseOneResult()
+			throws Exception {
+		configureGate();
+		java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors
+				.newFixedThreadPool(2);
+		try (Git git = new Git(db)) {
+			Status initial = git.status().call();
+			reply("next\0");
+			Files.writeString(
+					new File(db.getDirectory(), "gate-enabled").toPath(),
+					"gate");
+			java.util.concurrent.CyclicBarrier start = new java.util.concurrent.CyclicBarrier(
+					2);
+			java.util.concurrent.Callable<Status> request = () -> {
+				start.await(3, java.util.concurrent.TimeUnit.SECONDS);
+				return git.status().call();
+			};
+			java.util.concurrent.Future<Status> first = pool.submit(request);
+			java.util.concurrent.Future<Status> second = pool.submit(request);
+			awaitHook();
+			Files.writeString(
+					new File(db.getDirectory(), "hook-release").toPath(),
+					"release");
+			assertSame(initial,
+					first.get(10, java.util.concurrent.TimeUnit.SECONDS));
+			assertSame(initial,
+					second.get(10, java.util.concurrent.TimeUnit.SECONDS));
+			assertTrue(!new File(db.getDirectory(), "hook-overlap").exists());
+			equal(baseline(git), initial);
+		} finally {
+			Files.writeString(
+					new File(db.getDirectory(), "hook-release").toPath(),
+					"release");
+			pool.shutdownNow();
+			assertTrue(pool.awaitTermination(10,
+					java.util.concurrent.TimeUnit.SECONDS));
+		}
+	}
+
+	@Test
+	public void atomicExternalIndexReplacementDuringHookForcesFreshScan()
+			throws Exception {
+		configureGate();
+		java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors
+				.newSingleThreadExecutor();
+		try (Git git = new Git(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			Status initial = git.status().call();
+			writeTrashFile("new", "new");
+			File alternate = new File(db.getDirectory(), "replacement-index");
+			Files.copy(db.getIndexFile().toPath(), alternate.toPath());
+			nativeGit(alternate, "add", "new");
+			reply("next\0");
+			Files.writeString(
+					new File(db.getDirectory(), "gate-enabled").toPath(),
+					"gate");
+			java.util.concurrent.Future<Status> result = pool
+					.submit(() -> git.status().call());
+			awaitHook();
+			Files.move(alternate.toPath(), db.getIndexFile().toPath(),
+					java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+					java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+			Files.writeString(
+					new File(db.getDirectory(), "hook-release").toPath(),
+					"release");
+			Status changed = result.get(10,
+					java.util.concurrent.TimeUnit.SECONDS);
+			assertNotSame(initial, changed);
+			assertEquals(Set.of("new"), changed.getAdded());
+			equal(baseline(git), changed);
+			assertEquals("A  new\0",
+					new String(
+							nativeGit(null, "status", "--porcelain=v1", "-z",
+									"--untracked-files=all", "--no-renames"),
+							StandardCharsets.UTF_8));
+			Status seeded = git.status().call();
+			assertNotSame(changed, seeded);
+			assertSame(seeded, git.status().call());
+		} finally {
+			Files.writeString(
+					new File(db.getDirectory(), "hook-release").toPath(),
+					"release");
+			pool.shutdownNow();
+			assertTrue(pool.awaitTermination(10,
+					java.util.concurrent.TimeUnit.SECONDS));
+		}
+	}
+
+	@Test
+	public void allSevenConflictStatesInvalidateAndAgreeWithNativeGit()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			org.eclipse.jgit.lib.ObjectId blob;
+			try (org.eclipse.jgit.lib.ObjectInserter inserter = db
+					.newObjectInserter()) {
+				blob = inserter.insert(org.eclipse.jgit.lib.Constants.OBJ_BLOB,
+						"base".getBytes(StandardCharsets.UTF_8));
+				inserter.flush();
+			}
+			int[][] stages = { { 1 }, { 2 }, { 1, 2 }, { 3 }, { 1, 3 },
+					{ 2, 3 }, { 1, 2, 3 } };
+			String[] codes = { "DD", "AU", "UD", "UA", "DU", "AA", "UU" };
+			org.eclipse.jgit.lib.IndexDiff.StageState[] states = {
+					org.eclipse.jgit.lib.IndexDiff.StageState.BOTH_DELETED,
+					org.eclipse.jgit.lib.IndexDiff.StageState.ADDED_BY_US,
+					org.eclipse.jgit.lib.IndexDiff.StageState.DELETED_BY_THEM,
+					org.eclipse.jgit.lib.IndexDiff.StageState.ADDED_BY_THEM,
+					org.eclipse.jgit.lib.IndexDiff.StageState.DELETED_BY_US,
+					org.eclipse.jgit.lib.IndexDiff.StageState.BOTH_ADDED,
+					org.eclipse.jgit.lib.IndexDiff.StageState.BOTH_MODIFIED };
+			Status previous = git.status().call();
+			for (int i = 0; i < stages.length; i++) {
+				org.eclipse.jgit.dircache.DirCache cache = db.lockDirCache();
+				org.eclipse.jgit.dircache.DirCacheBuilder builder = cache
+						.builder();
+				for (int stage : stages[i]) {
+					org.eclipse.jgit.dircache.DirCacheEntry entry = new org.eclipse.jgit.dircache.DirCacheEntry(
+							"tracked", stage);
+					entry.setFileMode(
+							org.eclipse.jgit.lib.FileMode.REGULAR_FILE);
+					entry.setObjectId(blob);
+					builder.add(entry);
+				}
+				assertTrue(builder.commit());
+				reply("conflict-" + i + "\0");
+				Status conflict = git.status().call();
+				assertNotSame(previous, conflict);
+				assertEquals(java.util.Map.of("tracked", states[i]),
+						conflict.getConflictingStageState());
+				equal(baseline(git), conflict);
+				assertEquals(codes[i] + " tracked\0",
+						new String(nativeGit(null, "status", "--porcelain=v1",
+								"-z", "--untracked-files=all", "--no-renames"),
+								StandardCharsets.UTF_8));
+				assertSame(conflict, git.status().call());
+				previous = conflict;
+			}
+		}
+	}
+
+	@Test
+	public void indexVersionsAndAssumeUnchangedSkipWorktreeFlagsRemainCorrect()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			Status previous = git.status().call();
+			for (String version : new String[] { "2", "3", "4" }) {
+				nativeGit(null, "update-index", "--index-version", version);
+				reply("version-" + version + "\0");
+				Status status = git.status().call();
+				equal(baseline(git), status);
+				assertTrue(status.isClean());
+				assertSame(status, git.status().call());
+				previous = status;
+			}
+			nativeGit(null, "update-index", "--assume-unchanged", "tracked");
+			writeTrashFile("tracked", "edit");
+			reply("assumed\0tracked\0");
+			Status assumed = git.status().call();
+			assertNotSame(previous, assumed);
+			assertTrue(assumed.isClean());
+			equal(baseline(git), assumed);
+			nativeGit(null, "update-index", "--no-assume-unchanged", "tracked");
+			reply("unassumed\0");
+			Status modified = git.status().call();
+			assertEquals(Set.of("tracked"), modified.getModified());
+			equal(baseline(git), modified);
+			nativeGit(null, "update-index", "--skip-worktree", "tracked");
+			Files.delete(tracked.toPath());
+			reply("skipped\0");
+			Status skipped = git.status().call();
+			assertNotSame(modified, skipped);
+			assertTrue(skipped.getMissing().isEmpty());
+			equal(baseline(git), skipped);
+			nativeGit(null, "update-index", "--no-skip-worktree", "tracked");
+			reply("unskipped\0");
+			Status missing = git.status().call();
+			assertEquals(Set.of("tracked"), missing.getMissing());
+			equal(baseline(git), missing);
+		}
+	}
+
+	@Test
+	public void independentRepositoryObjectsAndReopenNeverShareCachedResults()
+			throws Exception {
+		configure(null);
+		try (Git original = new Git(db)) {
+			Status first = original.status().call();
+			reply("next\0");
+			try (Git reopened = Git.open(db.getWorkTree())) {
+				assertNotSame(db, reopened.getRepository());
+				reopened.getRepository().getConfig().setBoolean("jgit", null,
+						"fsmonitorCache", true);
+				reopened.getRepository().getConfig().setString("core", null,
+						"fsmonitor",
+						db.getConfig().getString("core", null, "fsmonitor"));
+				Status second = reopened.status().call();
+				assertNotSame(first, second);
+				equal(first, second);
+				assertSame(second, reopened.status().call());
+				assertSame(first, original.status().call());
+			}
+			org.eclipse.jgit.lib.Repository other = createWorkRepository();
+			try (Git secondRepo = new Git(other)) {
+				other.getConfig().setBoolean("jgit", null, "fsmonitorCache",
+						true);
+				other.getConfig().setString("core", null, "fsmonitor",
+						db.getConfig().getString("core", null, "fsmonitor"));
+				File onlyOther = new File(other.getWorkTree(), "only-other");
+				Files.writeString(onlyOther.toPath(), "other");
+				Status isolated = secondRepo.status().call();
+				assertEquals(Set.of("only-other"), isolated.getUntracked());
+				assertSame(isolated, secondRepo.status().call());
+				assertSame(first, original.status().call());
+			}
+		}
+	}
+
+	@Test
+	public void globalAndInfoAttributesChangesInvalidateWithoutPathNotifications()
+			throws Exception {
+		configure(null);
+		File global = new File(db.getDirectory(), "global-attributes");
+		Files.writeString(global.toPath(), "tracked -text\n");
+		db.getConfig().setString("core", null, "attributesFile",
+				global.getAbsolutePath());
+		try (Git git = new Git(db)) {
+			writeTrashFile("tracked", "line\n");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			writeTrashFile("tracked", "line\r\n");
+			Status raw = git.status().call();
+			assertEquals(Set.of("tracked"), raw.getModified());
+			java.nio.file.attribute.FileTime originalTime = Files
+					.getLastModifiedTime(global.toPath());
+			Files.writeString(global.toPath(), "tracked text eol=lf\n");
+			Files.setLastModifiedTime(global.toPath(), originalTime);
+			reply("global-changed\0");
+			Status normalized = git.status().call();
+			assertNotSame(raw, normalized);
+			assertTrue(normalized.isClean());
+			assertEquals("",
+					new String(
+							nativeGit(null, "-c",
+									"core.attributesFile="
+											+ global.getAbsolutePath(),
+									"status", "--porcelain=v1", "-z",
+									"--untracked-files=all", "--no-renames"),
+							StandardCharsets.UTF_8));
+			File info = new File(db.getDirectory(), "info/attributes");
+			Files.createDirectories(info.toPath().getParent());
+			Files.writeString(info.toPath(), "tracked -text\n");
+			reply("info-changed\0");
+			Status overridden = git.status().call();
+			assertNotSame(normalized, overridden);
+			assertEquals(Set.of("tracked"), overridden.getModified());
+			equal(baseline(git), overridden);
+			Files.delete(info.toPath());
+			reply("info-removed\0");
+			Status restored = git.status().call();
+			assertNotSame(overridden, restored);
+			assertTrue(restored.isClean());
+			assertEquals("",
+					new String(
+							nativeGit(null, "-c",
+									"core.attributesFile="
+											+ global.getAbsolutePath(),
+									"status", "--porcelain=v1", "-z",
+									"--untracked-files=all", "--no-renames"),
+							StandardCharsets.UTF_8));
+		}
+	}
+
+	@Test
+	public void inheritedGlobalConfigChangeInvalidatesEffectiveIgnoreRules()
+			throws Exception {
+		configure(null);
+		org.eclipse.jgit.lib.Config base = db.getConfig().getBaseConfig();
+		org.junit.Assert.assertNotNull(base);
+		String[] old = base.getStringList("core", null, "excludesFile");
+		try (Git git = new Git(db)) {
+			writeTrashFile("other", "other");
+			Status first = git.status().call();
+			assertEquals(Set.of("other"), first.getUntracked());
+			File exclude = new File(db.getDirectory(), "inherited-ignore");
+			Files.writeString(exclude.toPath(), "other\n");
+			base.setString("core", null, "excludesFile",
+					exclude.getAbsolutePath());
+			reply("global-changed\0");
+			Status ignored = git.status().call();
+			assertNotSame(first, ignored);
+			assertEquals(Set.of("other"), ignored.getIgnoredNotInIndex());
+			equal(baseline(git), ignored);
+		} finally {
+			base.setStringList("core", null, "excludesFile",
+					java.util.List.of(old));
+		}
+	}
+
+	@Test
+	public void fileDirectoryAndSymlinkTransitionsNeverReuseObsoleteResults()
+			throws Exception {
+		configure(null);
+		org.junit.Assume.assumeTrue(db.getFS().supportsSymlinks());
+		try (Git git = new Git(db)) {
+			File shape = writeTrashFile("shape", "base");
+			git.add().addFilepattern("shape").call();
+			git.commit().setMessage("base").call();
+			Status regular = git.status().call();
+			Files.delete(shape.toPath());
+			writeTrashFile("shape/child", "new");
+			reply("directory\0shape\0");
+			Status directory = git.status().call();
+			assertNotSame(regular, directory);
+			assertEquals(Set.of("shape"), directory.getMissing());
+			assertEquals(Set.of("shape/child"), directory.getUntracked());
+			equal(baseline(git), directory);
+			Files.delete(shape.toPath().resolve("child"));
+			Files.delete(shape.toPath());
+			Files.createSymbolicLink(shape.toPath(),
+					java.nio.file.Path.of("base"));
+			reply("symlink\0shape\0");
+			Status symlink = git.status().call();
+			assertNotSame(directory, symlink);
+			assertEquals(Set.of("shape"), symlink.getModified());
+			equal(baseline(git), symlink);
+			assertEquals(" T shape\0",
+					new String(
+							nativeGit(null, "status", "--porcelain=v1", "-z",
+									"--untracked-files=all", "--no-renames"),
+							StandardCharsets.UTF_8));
+			Files.delete(shape.toPath());
+			writeTrashFile("shape", "base");
+			reply("regular\0shape\0");
+			Status restored = git.status().call();
+			assertNotSame(symlink, restored);
+			assertTrue(restored.isClean());
+			equal(baseline(git), restored);
+			reply("stable\0");
+			assertSame(restored, git.status().call());
+		}
+	}
+
+	@Test
+	public void notifiedSameSizeEditWithRestoredTimestampMustScan()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("tracked", "one");
+			java.nio.file.attribute.FileTime time = java.nio.file.attribute.FileTime
+					.fromMillis(System.currentTimeMillis() - 60_000);
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			Status initial = git.status().call();
+			writeTrashFile("tracked", "two");
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			reply("changed\0tracked\0");
+			Status changed = git.status().call();
+			assertNotSame(initial, changed);
+			// Native Git is the oracle here: the unmonitored metadata-only scan
+			// misses a restored timestamp. The notification must force hashing.
+			assertEquals(" M tracked\0",
+					new String(
+							nativeGit(null, "status", "--porcelain=v1", "-z",
+									"--untracked-files=all", "--no-renames"),
+							StandardCharsets.UTF_8));
+			assertEquals(Set.of("tracked"), changed.getModified());
+		}
+	}
+
+	@Test
+	public void gitlinkAdditionRemovalRevalidatesNegativeCache()
+			throws Exception {
+		configure(null);
+		FsMonitor.State state = new FsMonitor.State();
+		FsMonitor.Probe initial = state.query(db);
+		org.junit.Assert.assertNotNull(initial);
+		state.remember(initial);
+		org.eclipse.jgit.dircache.DirCache cache = db.lockDirCache();
+		org.eclipse.jgit.dircache.DirCacheBuilder builder = cache.builder();
+		org.eclipse.jgit.dircache.DirCacheEntry entry = new org.eclipse.jgit.dircache.DirCacheEntry(
+				"submodule");
+		entry.setFileMode(org.eclipse.jgit.lib.FileMode.GITLINK);
+		entry.setObjectId(org.eclipse.jgit.lib.ObjectId
+				.fromString("1111111111111111111111111111111111111111"));
+		builder.add(entry);
+		assertTrue(builder.commit());
+		reply("with-gitlink\0");
+		assertNull(state.query(db));
+		assertNull(state.query(db));
+		cache = db.lockDirCache();
+		assertTrue(cache.builder().commit());
+		reply("without-gitlink\0");
+		FsMonitor.Probe removed = state.query(db);
+		org.junit.Assert.assertNotNull(removed);
+		org.junit.Assert.assertFalse(removed.isUnchanged());
+		state.remember(removed);
+		assertTrue(state.query(db).isUnchanged());
+	}
+
+	@Test
+	public void invalidVersionsMissingNonexecutableDisabledAndBareRepositoriesNeverRunHooks()
+			throws Exception {
+		File called = new File(db.getDirectory(), "hook-called");
+		configure("touch '" + called.getPath().replace("'", "'\\''")
+				+ "'\nprintf 'token\\0'\n");
+		String hook = db.getConfig().getString("core", null, "fsmonitor");
+		for (String version : new String[] { "0", "1", "3", "-1",
+				"not-a-number" }) {
+			db.getConfig().setString("core", null, "fsmonitorHookVersion",
+					version);
+			assertNull(new FsMonitor.State().query(db));
+			assertTrue(!called.exists());
+		}
+		db.getConfig().setInt("core", null, "fsmonitorHookVersion", 2);
+		assertTrue(new File(hook).setExecutable(false, false));
+		assertNull(new FsMonitor.State().query(db));
+		assertTrue(!called.exists());
+		db.getConfig().setString("core", null, "fsmonitor", hook + "-missing");
+		assertNull(new FsMonitor.State().query(db));
+		db.getConfig().setString("core", null, "fsmonitor",
+				new File(hook).getParent());
+		assertNull(new FsMonitor.State().query(db));
+		db.getConfig().setString("core", null, "fsmonitor", "");
+		assertNull(new FsMonitor.State().query(db));
+		db.getConfig().setString("core", null, "fsmonitor", hook);
+		assertTrue(new File(hook).setExecutable(true));
+		db.getConfig().unset("jgit", null, "fsmonitorCache");
+		org.junit.Assert.assertFalse(FsMonitor.isEnabled(db));
+		assertNull(new FsMonitor.State().query(db));
+		org.eclipse.jgit.lib.Repository bare = createBareRepository();
+		bare.getConfig().setBoolean("jgit", null, "fsmonitorCache", true);
+		bare.getConfig().setString("core", null, "fsmonitor", hook);
+		org.junit.Assert.assertFalse(FsMonitor.isEnabled(bare));
+		assertNull(new FsMonitor.State().query(bare));
+		assertTrue(!called.exists());
+	}
+
+	@Test
+	public void directoryRootAndNoncanonicalNotificationsForceContentChecks()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("directory/tracked", "one");
+			java.nio.file.attribute.FileTime time = java.nio.file.attribute.FileTime
+					.fromMillis(System.currentTimeMillis() - 60_000);
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			git.add().addFilepattern("directory/tracked").call();
+			git.commit().setMessage("base").call();
+			git.status().call();
+			int version = 0;
+			for (String path : new String[] { "directory", "directory/", "/",
+					"directory/./tracked", "directory//tracked",
+					"DIRECTORY/TRACKED" }) {
+				if (path.equals("DIRECTORY/TRACKED")) {
+					db.getConfig().setBoolean("core", null, "ignoreCase", true);
+					git.status().call();
+				}
+				String content = ++version % 2 == 0 ? "one" : "two";
+				Files.writeString(tracked.toPath(), content);
+				Files.setLastModifiedTime(tracked.toPath(), time);
+				reply("change-" + version + "\0" + path + "\0");
+				Status changed = git.status().call();
+				assertEquals(path,
+						content.equals("one") ? Set.of()
+								: Set.of("directory/tracked"),
+						changed.getModified());
+				String nativeStatus = new String(
+						nativeGit(null, "status", "--porcelain=v1", "-z",
+								"--untracked-files=all", "--no-renames"),
+						StandardCharsets.UTF_8);
+				assertEquals(
+						content.equals("one") ? "" : " M directory/tracked\0",
+						nativeStatus);
+				reply("stable-" + version + "\0");
+				assertSame(changed, git.status().call());
+			}
+		}
+	}
+
+	@Test
+	public void clockBoundariesAndImmutableDeltasKeepUntrustedEpochsUncacheable()
+			throws Exception {
+		configure(null);
+		FsMonitor.State state = new FsMonitor.State();
+		reply("c:1:2:3:18446744073709551614\0");
+		FsMonitor.Probe first = state.query(db);
+		org.junit.Assert.assertNotNull(first);
+		assertEquals(java.util.List.of("/"), first.getChangedPaths());
+		org.junit.Assert.assertThrows(UnsupportedOperationException.class,
+				() -> first.getChangedPaths().add("injected"));
+		state.remember(first);
+		reply("c:1:2:3:18446744073709551615\0.git/index\0");
+		FsMonitor.Probe maximum = state.query(db);
+		assertTrue(maximum.isUnchanged());
+		assertTrue(maximum.getChangedPaths().isEmpty());
+		state.remember(maximum);
+		for (String token : new String[] { "c:1:2:3:0", "c:1:2:4:11",
+				"c:0:2:3:11", "c:1:2:3:-1", "c:1:2:3:18446744073709551616",
+				"c:01:2:3:11", "c:1:2:3:11:extra", "opaque" }) {
+			reply(token + "\0");
+			FsMonitor.Probe invalidEpoch = state.query(db);
+			org.junit.Assert.assertNotNull(invalidEpoch);
+			org.junit.Assert.assertFalse(token, invalidEpoch.isUnchanged());
+			assertEquals(java.util.List.of("/"),
+					invalidEpoch.getChangedPaths());
+		}
+	}
+
+	@Test
+	public void failedScanCannotSeedCacheAndRecoveryRevalidatesEverything()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			Status initial = git.status().call();
+			byte[] savedIndex = Files.readAllBytes(db.getIndexFile().toPath());
+			try {
+				Files.write(db.getIndexFile().toPath(), new byte[] { 1, 2, 3 });
+				reply("failed\0");
+				org.junit.Assert.assertThrows(
+						org.eclipse.jgit.api.errors.JGitInternalException.class,
+						() -> git.status().call());
+			} finally {
+				Files.write(db.getIndexFile().toPath(), savedIndex);
+			}
+			writeTrashFile("tracked", "edit");
+			reply("recovered\0");
+			Status recovered = git.status().call();
+			assertNotSame(initial, recovered);
+			assertEquals(Set.of("tracked"), recovered.getModified());
+			equal(baseline(git), recovered);
+			assertSame(recovered, git.status().call());
+		}
+	}
+
+	@Test
+	public void failedOrMalformedSupportedHookForcesContentChecksOnFallback()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("tracked", "one");
+			java.nio.file.attribute.FileTime time = java.nio.file.attribute.FileTime
+					.fromMillis(System.currentTimeMillis() - 60_000);
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			git.status().call();
+			File hook = new File(
+					db.getConfig().getString("core", null, "fsmonitor"));
+			for (String script : new String[] {
+					"printf 'bad\\0../outside\\0'\n", "exit 1\n",
+					"printf '\\377\\0'\n" }) {
+				Files.writeString(hook.toPath(), "#!/bin/sh\n" + script);
+				Files.writeString(tracked.toPath(), "two");
+				Files.setLastModifiedTime(tracked.toPath(), time);
+				Status modified = git.status().call();
+				assertEquals(Set.of("tracked"), modified.getModified());
+				assertNotSame(modified, git.status().call());
+				assertEquals(" M tracked\0",
+						new String(nativeGit(null, "status", "--porcelain=v1",
+								"-z", "--untracked-files=all", "--no-renames"),
+								StandardCharsets.UTF_8));
+				Files.writeString(tracked.toPath(), "one");
+				Files.setLastModifiedTime(tracked.toPath(), time);
+				assertTrue(git.status().call().isClean());
+			}
+		}
+	}
+
+	@Test
+	public void attributesChangedDuringHookRequireContentChecksAndCannotSeedCache()
+			throws Exception {
+		configureGate();
+		File attributes = new File(db.getDirectory(), "global-attributes");
+		Files.writeString(attributes.toPath(), "tracked text eol=lf\n");
+		db.getConfig().setString("core", null, "attributesFile",
+				attributes.getAbsolutePath());
+		java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors
+				.newSingleThreadExecutor();
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("tracked", "line\r\n");
+			java.nio.file.Files.setLastModifiedTime(tracked.toPath(),
+					java.nio.file.attribute.FileTime
+							.fromMillis(System.currentTimeMillis() - 60_000));
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			Status initial = git.status().call();
+			assertTrue(initial.isClean());
+			reply("next\0");
+			Files.writeString(
+					new File(db.getDirectory(), "gate-enabled").toPath(),
+					"gate");
+			java.util.concurrent.Future<Status> pending = pool
+					.submit(() -> git.status().call());
+			awaitHook();
+			Files.writeString(attributes.toPath(), "tracked -text\n");
+			Files.writeString(
+					new File(db.getDirectory(), "hook-release").toPath(),
+					"release");
+			Status changed = pending.get(10,
+					java.util.concurrent.TimeUnit.SECONDS);
+			assertNotSame(initial, changed);
+			assertEquals(Set.of("tracked"), changed.getModified());
+			assertEquals(" M tracked\0",
+					new String(
+							nativeGit(null, "-c",
+									"core.attributesFile="
+											+ attributes.getAbsolutePath(),
+									"status", "--porcelain=v1", "-z",
+									"--untracked-files=all", "--no-renames"),
+							StandardCharsets.UTF_8));
+			Status seeded = git.status().call();
+			assertNotSame(changed, seeded);
+			assertEquals(changed.getModified(), seeded.getModified());
+			assertSame(seeded, git.status().call());
+		} finally {
+			Files.writeString(
+					new File(db.getDirectory(), "hook-release").toPath(),
+					"release");
+			pool.shutdownNow();
+			assertTrue(pool.awaitTermination(10,
+					java.util.concurrent.TimeUnit.SECONDS));
+		}
+	}
+
+	@Test
+	public void collectedResultCannotTurnUnchangedDirtyWorkingTreeIntoCleanSnapshot()
+			throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("tracked", "one");
+			java.nio.file.attribute.FileTime time = java.nio.file.attribute.FileTime
+					.fromMillis(System.currentTimeMillis() - 60_000);
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			git.status().call();
+			Files.writeString(tracked.toPath(), "two");
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			reply("changed\0tracked\0");
+			Status dirty = git.status().call();
+			assertEquals(Set.of("tracked"), dirty.getModified());
+			reply("unchanged\0");
+			assertSame(dirty, git.status().call());
+			java.lang.reflect.Field monitored = org.eclipse.jgit.api.StatusCommand.class
+					.getDeclaredField("MONITORED");
+			monitored.setAccessible(true);
+			java.util.Map<?, ?> map = (java.util.Map<?, ?>) monitored.get(null);
+			Object cache;
+			synchronized (map) {
+				cache = map.get(db);
+			}
+			org.junit.Assert.assertNotNull(cache);
+			java.lang.reflect.Field result = cache.getClass()
+					.getDeclaredField("result");
+			result.setAccessible(true);
+			// Deterministically model collection instead of relying on
+			// System.gc().
+			((java.lang.ref.WeakReference<?>) result.get(cache)).clear();
+			Status rebuilt = git.status().call();
+			assertNotSame(dirty, rebuilt);
+			assertEquals(Set.of("tracked"), rebuilt.getModified());
+			assertSame(rebuilt, git.status().call());
+			assertEquals(" M tracked\0",
+					new String(
+							nativeGit(null, "status", "--porcelain=v1", "-z",
+									"--untracked-files=all", "--no-renames"),
+							StandardCharsets.UTF_8));
+		}
+	}
+
+	@Test
+	public void stateCorrelationIncludesRepositoryAndWorkingTreeIdentity()
+			throws Exception {
+		configure(null);
+		FsMonitor.State state = new FsMonitor.State();
+		FsMonitor.Probe initial = state.query(db);
+		org.junit.Assert.assertNotNull(initial);
+		state.remember(initial);
+		reply("next\0");
+		assertTrue(state.query(db).isUnchanged());
+		org.eclipse.jgit.lib.Repository other = createWorkRepository();
+		other.getConfig().fromText(db.getConfig().toText());
+		FsMonitor.Probe differentRepository = state.query(other);
+		org.junit.Assert.assertNotNull(differentRepository);
+		org.junit.Assert.assertFalse(
+				"Identical index/HEAD/config must not identify another worktree",
+				differentRepository.isUnchanged());
+		assertEquals(java.util.List.of("/"),
+				differentRepository.getChangedPaths());
+	}
+
+	@Test
+	public void parserPathBoundaryMatrix() throws Exception {
+		for (String path : new String[] { "/absolute", "..", "../x", "x/..",
+				"x/../y", "x\\y", "" }) {
+			assertNull(path, FsMonitor.parse(("token\0" + path + "\0")
+					.getBytes(StandardCharsets.UTF_8)));
+		}
+		for (String path : new String[] { "/", ".git", ".git/index", "a/./b",
+				"a..b", "space name", "line\nname", "tab\tname", "ü/ß",
+				"nested/.git", "-option" }) {
+			assertEquals(path, FsMonitor.parse(("token\0" + path + "\0")
+					.getBytes(StandardCharsets.UTF_8))[1]);
 		}
 	}
 

@@ -160,7 +160,8 @@ public class StatusCommand extends GitCommand<Status> {
 				}
 				cache.result.clear();
 				try {
-					Status result = scanStatus();
+					Status result = scanStatus(probe, cache.monitor.requiresFullContentCheck()
+							|| probe != null && previous == null);
 					cache.monitor.remember(probe);
 					if (probe != null) {
 						cache.result = new WeakReference<>(result);
@@ -176,11 +177,20 @@ public class StatusCommand extends GitCommand<Status> {
 	}
 
 	private Status scanStatus() throws GitAPIException, NoWorkTreeException {
+		return scanStatus(null, false);
+	}
+
+	private Status scanStatus(FsMonitor.Probe probe, boolean forceContentCheck) throws GitAPIException, NoWorkTreeException {
 		if (workingTreeIt == null)
 			workingTreeIt = new FileTreeIterator(repo);
 
 		try {
 			IndexDiff diff = new IndexDiff(repo, Constants.HEAD, workingTreeIt);
+			if (forceContentCheck) {
+				diff.setForceContentCheckPaths(java.util.List.of("/")); //$NON-NLS-1$
+			} else if (probe != null) {
+				diff.setForceContentCheckPaths(probe.getChangedPaths());
+			}
 			if (ignoreSubmoduleMode != null)
 				diff.setIgnoreSubmoduleMode(ignoreSubmoduleMode);
 			if (paths != null)

@@ -64,6 +64,44 @@ public class IndexDiffTest extends RepositoryTestCase {
 		};
 	}
 
+
+	@Test
+	public void regularFileToSymlinkWithIdenticalBytesIsATypeChange() throws Exception {
+		org.junit.Assume.assumeTrue(db.getFS().supportsSymlinks());
+		try (Git git = new Git(db)) {
+			File shape = writeTrashFile("shape", "target");
+			git.add().addFilepattern("shape").call();
+			git.commit().setMessage("base").call();
+			java.nio.file.Files.delete(shape.toPath());
+			java.nio.file.Files.createSymbolicLink(shape.toPath(), java.nio.file.Path.of("target"));
+			IndexDiff diff = new IndexDiff(db, Constants.HEAD, new FileTreeIterator(db));
+			assertTrue(diff.diff());
+			assertEquals(java.util.Set.of("shape"), diff.getModified());
+		}
+	}
+
+	@Test
+	public void explicitContentCheckPathsAreCopiedAndDoNotWriteIndex() throws Exception {
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("dir/tracked", "one");
+			java.nio.file.attribute.FileTime time = java.nio.file.attribute.FileTime.fromMillis(
+					System.currentTimeMillis() - 60_000);
+			java.nio.file.Files.setLastModifiedTime(tracked.toPath(), time);
+			git.add().addFilepattern("dir/tracked").call();
+			git.commit().setMessage("base").call();
+			byte[] before = java.nio.file.Files.readAllBytes(db.getIndexFile().toPath());
+			writeTrashFile("dir/tracked", "two");
+			java.nio.file.Files.setLastModifiedTime(tracked.toPath(), time);
+			IndexDiff diff = new IndexDiff(db, Constants.HEAD, new FileTreeIterator(db));
+			java.util.List<String> paths = new java.util.ArrayList<>(java.util.List.of("dir/"));
+			diff.setForceContentCheckPaths(paths);
+			paths.clear();
+			assertTrue(diff.diff());
+			assertEquals(java.util.Set.of("dir/tracked"), diff.getModified());
+			org.junit.Assert.assertArrayEquals(before, java.nio.file.Files.readAllBytes(db.getIndexFile().toPath()));
+		}
+	}
+
 	@Test
 	public void testAdded() throws IOException {
 		writeTrashFile("file1", "file1");

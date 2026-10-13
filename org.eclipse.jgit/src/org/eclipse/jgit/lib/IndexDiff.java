@@ -253,6 +253,8 @@ public class IndexDiff {
 
 	private DirCache dirCache;
 
+	private Collection<String> forceContentCheckPaths = java.util.List.of();
+
 	private IndexDiffFilter indexDiffFilter;
 
 	private Map<String, IndexDiff> submoduleIndexDiffs = new HashMap<>();
@@ -475,12 +477,74 @@ public class IndexDiff {
 		}
 	}
 
+	/**
+	 * Require content checks for paths whose stat metadata is known to be
+	 * stale. Paths include their descendants; "/" requests checks throughout
+	 * the index. The on-disk index is not modified. Assume-unchanged and
+	 * skip-worktree flags retain their usual semantics.
+	 *
+	 * @param paths
+	 *            repository-relative paths, copied on entry
+	 * @since 7.8
+	 */
+	public void setForceContentCheckPaths(Collection<String> paths) {
+		forceContentCheckPaths = java.util.List.copyOf(paths);
+	}
+
+	private void invalidateStatMetadata() {
+		if (forceContentCheckPaths.isEmpty()) {
+			return;
+		}
+		boolean all = repository.getConfig().getBoolean("core", null, //$NON-NLS-1$
+				"ignoreCase", false); //$NON-NLS-1$
+		for (String path : forceContentCheckPaths) {
+			if (path.equals("/") || path.matches("(^|.*/)\\.(/.*|$)") //$NON-NLS-1$ //$NON-NLS-2$
+					|| path.contains("//")) { //$NON-NLS-1$
+				all = true;
+				break;
+			}
+		}
+		if (all) {
+			for (int i = 0; i < dirCache.getEntryCount(); i++) {
+				invalidateStatMetadata(dirCache.getEntry(i));
+			}
+			return;
+		}
+		for (String path : forceContentCheckPaths) {
+			String directory = path.endsWith("/") ? path : path + "/"; //$NON-NLS-1$ //$NON-NLS-2$
+			int file = dirCache.findEntry(path);
+			if (file >= 0) {
+				invalidateStatMetadata(dirCache.getEntry(file));
+			}
+			int start = dirCache.findEntry(directory);
+			if (start < 0) {
+				start = -(start + 1);
+			}
+			for (int i = start; i < dirCache.getEntryCount(); i++) {
+				DirCacheEntry entry = dirCache.getEntry(i);
+				if (!entry.getPathString().startsWith(directory)) {
+					break;
+				}
+				invalidateStatMetadata(entry);
+			}
+		}
+	}
+
+	private static void invalidateStatMetadata(DirCacheEntry entry) {
+		if (entry.getStage() == 0 && !entry.isAssumeValid()
+				&& !entry.isSkipWorkTree()
+				&& entry.getFileMode() != FileMode.GITLINK) {
+			entry.smudgeRacilyClean();
+		}
+	}
+
 	private boolean diffWithTrace(ProgressMonitor monitor, int estWorkTreeSize,
 			int estIndexSize, String title, RepositoryBuilderFactory factory)
 			throws IOException {
 		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
 				"index", "read")) { //$NON-NLS-1$ //$NON-NLS-2$
 			dirCache = repository.readDirCache();
+			invalidateStatMetadata();
 		}
 
 		try (TreeWalk treeWalk = new TreeWalk(repository)) {

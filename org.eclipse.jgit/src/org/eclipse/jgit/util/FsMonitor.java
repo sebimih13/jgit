@@ -20,6 +20,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jgit.dircache.DirCache;
@@ -33,9 +36,10 @@ import org.eclipse.jgit.lib.Repository;
 /**
  * Opt-in, process-local fsmonitor hook v2 validation for status caches.
  * <p>
- * No FSMN or UNTR index extension is read or written. Changes and untrusted
- * replies always require a full scan. Callers must retain a successful scan
- * result separately and serialize query/scan/remember on their cache lock.
+ * No FSMN bits or native UNTR data are used for scan reuse. Changes and
+ * untrusted replies always require a full scan. Callers must retain a
+ * successful scan result separately and serialize query/scan/remember on their
+ * cache lock.
  * </p>
  *
  * @since 7.8
@@ -67,15 +71,28 @@ public final class FsMonitor {
 
 		private final boolean unchanged;
 
-		private Probe(String fingerprint, String token, boolean unchanged) {
+		private final List<String> changedPaths;
+
+		private Probe(String fingerprint, String token, boolean unchanged,
+				List<String> changedPaths) {
 			this.fingerprint = fingerprint;
 			this.token = token;
 			this.unchanged = unchanged;
+			this.changedPaths = List.copyOf(changedPaths);
 		}
 
 		/** @return whether no filesystem/context changes were observed */
 		public boolean isUnchanged() {
 			return unchanged;
+		}
+
+		/**
+		 * @return immutable paths whose stat metadata cannot be trusted, or a
+		 *         single root marker when correlation must be rebuilt
+		 * @since 7.8
+		 */
+		public List<String> getChangedPaths() {
+			return changedPaths;
 		}
 	}
 
@@ -91,6 +108,8 @@ public final class FsMonitor {
 
 		private FileSnapshot unsupportedIndex;
 
+		private boolean fullContentCheckRequired;
+
 		/**
 		 * Drop correlation after cancellation, failure or external cache
 		 * updates.
@@ -99,6 +118,7 @@ public final class FsMonitor {
 			fingerprint = token = checkedIndex = null;
 			supportedIndex = false;
 			unsupportedIndex = null;
+			fullContentCheckRequired = false;
 		}
 
 		/**
@@ -110,12 +130,14 @@ public final class FsMonitor {
 		 * @return a probe, or null when a full scan cannot seed this cache
 		 */
 		public synchronized Probe query(Repository repository) {
+			fullContentCheckRequired = false;
 			if (!isEnabled(repository)) {
 				clear();
 				return null;
 			}
 			try (Trace2.Scope trace = Trace2.getInstance().region(repository,
 					"fsm_hook", "query")) { //$NON-NLS-1$ //$NON-NLS-2$
+				boolean supported = false;
 				try {
 					Config config = repository.getConfig();
 					if (config.getInt("core", null, "fsmonitorHookVersion", //$NON-NLS-1$ //$NON-NLS-2$
@@ -124,7 +146,8 @@ public final class FsMonitor {
 						return null;
 					}
 					String hook = config.getString("core", null, "fsmonitor"); //$NON-NLS-1$ //$NON-NLS-2$
-					if (hook == null || hook.isEmpty()) {
+					if (hook == null || hook.isEmpty()
+							|| isBooleanSetting(hook)) {
 						clear();
 						return null;
 					}
@@ -165,6 +188,7 @@ public final class FsMonitor {
 						return null;
 					}
 					unsupportedIndex = null;
+					supported = true;
 					String key = fingerprint(repository, index,
 							executable.toPath());
 					// A stale Watchman clock requests a fresh-instance reply
@@ -179,9 +203,11 @@ public final class FsMonitor {
 					if (records == null) {
 						trace.data("query/failed", "invalid-response"); //$NON-NLS-1$ //$NON-NLS-2$
 						clear();
+						fullContentCheckRequired = true;
 						return null;
 					}
 					boolean noChanges = true;
+					List<String> changedPaths = new ArrayList<>();
 					for (int i = 1; i < records.length; i++) {
 						// Native Git does not have worktree entries inside its
 						// .git directory.
@@ -190,7 +216,7 @@ public final class FsMonitor {
 						if (!records[i].equals(".git") //$NON-NLS-1$
 								&& !records[i].startsWith(".git/")) {
 							noChanges = false;
-							break;
+							changedPaths.add(records[i]);
 						}
 					}
 					// External index/ref/config changes during the hook
@@ -200,6 +226,7 @@ public final class FsMonitor {
 							executable.toPath()))) {
 						trace.data("query/failed", "context-changed"); //$NON-NLS-1$ //$NON-NLS-2$
 						clear();
+						fullContentCheckRequired = true;
 						return null;
 					}
 					boolean sameContext = key.equals(fingerprint);
@@ -208,10 +235,16 @@ public final class FsMonitor {
 					// when its daemon is unavailable. Such a reply cannot
 					// validate
 					// cached data, even if it lists only Git metadata.
-					noChanges &= sameMonitorInstance(token, records[0]);
+					boolean sameInstance = sameMonitorInstance(token,
+							records[0]);
+					noChanges &= sameInstance;
+					if (!sameContext || !sameInstance) {
+						changedPaths = List.of("/"); //$NON-NLS-1$
+					}
 					trace.data("cache/hit", //$NON-NLS-1$
 							Boolean.toString(noChanges && sameContext));
-					return new Probe(key, records[0], noChanges && sameContext);
+					return new Probe(key, records[0], noChanges && sameContext,
+							changedPaths);
 				} catch (Exception failure) {
 					if (failure instanceof InterruptedException) {
 						Thread.currentThread().interrupt();
@@ -219,9 +252,20 @@ public final class FsMonitor {
 					trace.data("query/failed", //$NON-NLS-1$
 							failure.getClass().getSimpleName());
 					clear();
+					fullContentCheckRequired = supported;
 					return null;
 				}
 			}
+		}
+
+		/**
+		 * @return whether the last query encountered uncertainty after
+		 *         validating a supported index, requiring content checks on
+		 *         fallback
+		 * @since 7.8
+		 */
+		public synchronized boolean requiresFullContentCheck() {
+			return fullContentCheckRequired;
 		}
 
 		/**
@@ -270,14 +314,21 @@ public final class FsMonitor {
 			Path executable) throws Exception {
 		MessageDigest md = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
 		update(md, index);
+		update(md, repo.getDirectory().getAbsolutePath());
+		update(md, repo.getWorkTree().getAbsolutePath());
+		update(md, repo.getIndexFile().getAbsolutePath());
 		ObjectId head = repo.resolve(Constants.HEAD);
 		update(md, head == null ? "unborn" : head.name()); //$NON-NLS-1$
 		SystemReader reader = SystemReader.getInstance();
 		// Reload inherited external config before comparing effective inputs.
 		reader.getUserConfig();
-		for (Config config = repo.getConfig(); config != null; config = config
-				.getBaseConfig()) {
-			update(md, config.toText());
+		Config config = repo.getConfig();
+		for (String section : new TreeSet<>(config.getSections())) {
+			fingerprintConfig(md, config, section, null);
+			for (String subsection : new TreeSet<>(
+					config.getSubsections(section))) {
+				fingerprintConfig(md, config, section, subsection);
+			}
 		}
 		update(md, digest(executable));
 		update(md, digest(
@@ -304,6 +355,56 @@ public final class FsMonitor {
 			update(md, digest(path.toPath()));
 		}
 		return HexFormat.of().formatHex(md.digest());
+	}
+
+	// C Git parse.c: boolean text or a signed int with base-0 and k/m/g units.
+	// Boolean true selects Git's daemon, which this hook-only client cannot
+	// use.
+	private static boolean isBooleanSetting(String value) {
+		if (StringUtils.toBooleanOrNull(value) != null) {
+			return true;
+		}
+		String number = value.replaceFirst("^[ \\t\\r\\n\\f\\x0B]+", ""); //$NON-NLS-1$ //$NON-NLS-2$
+		if (!number.matches(
+				"[+-]?(?:0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)(?:[kKmMgG])?")) { //$NON-NLS-1$
+			return false;
+		}
+		long factor = 1;
+		char last = Character.toLowerCase(number.charAt(number.length() - 1));
+		if (last == 'k' || last == 'm' || last == 'g') {
+			factor = last == 'k' ? 1024
+					: last == 'm' ? 1024 * 1024 : 1024 * 1024 * 1024;
+			number = number.substring(0, number.length() - 1);
+		}
+		try {
+			long result = Math.multiplyExact(Long.decode(number).longValue(),
+					factor);
+			return result >= Integer.MIN_VALUE && result <= Integer.MAX_VALUE;
+		} catch (NumberFormatException | ArithmeticException invalid) {
+			return false;
+		}
+	}
+
+	private static void fingerprintConfig(MessageDigest md, Config config,
+			String section, String subsection) {
+		update(md, section);
+		update(md, subsection == null ? "0" : "1" + subsection); //$NON-NLS-1$ //$NON-NLS-2$
+		for (String name : new TreeSet<>(
+				config.getNames(section, subsection, true))) {
+			update(md, name);
+			String[] values = config.getStringList(section, subsection, name);
+			update(md, Integer.toString(values.length));
+			for (String value : values) {
+				// A valueless config entry means true; an empty string means
+				// false.
+				update(md, value == null ? "-1" //$NON-NLS-1$
+						: Config.isMissing(value) ? "-2" //$NON-NLS-1$
+								: Integer.toString(value.length()));
+				if (value != null) {
+					update(md, value);
+				}
+			}
+		}
 	}
 
 	private static void update(MessageDigest md, String value) {
