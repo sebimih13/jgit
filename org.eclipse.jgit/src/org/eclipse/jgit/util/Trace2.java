@@ -76,6 +76,8 @@ public final class Trace2 implements AutoCloseable {
 
 	private String configPatterns;
 
+	private String parentCommand;
+
 	private final Map<MetricKey, Long> counters = new LinkedHashMap<>();
 
 	private final Map<MetricKey, TimerStats> timers = new LinkedHashMap<>();
@@ -197,6 +199,7 @@ public final class Trace2 implements AutoCloseable {
 						: redactArguments(argv));
 		if (trace.enabled) {
 			try {
+				trace.parentCommand = reader.getenv("GIT_TRACE2_PARENT_NAME"); //$NON-NLS-1$
 				trace.configPatterns = setting(reader, globalConfig,
 						"GIT_TRACE2_CONFIG_PARAMS", "configParams"); //$NON-NLS-1$ //$NON-NLS-2$
 				trace.reportConfig(systemConfig, "system"); //$NON-NLS-1$
@@ -319,7 +322,7 @@ public final class Trace2 implements AutoCloseable {
 			previous = previous.parent;
 		}
 		if (previous == null) {
-			emit("cmd_name", fields("name", command, "hierarchy", command)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			emit("cmd_name", fields("name", command, "hierarchy", commandHierarchy(command))); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 		}
 		Scope scope = region(repository, "jgit", command); //$NON-NLS-1$
 		if (scope != NO_SCOPE) {
@@ -368,6 +371,11 @@ public final class Trace2 implements AutoCloseable {
 	Scope hook(Repository repository, String name, int jobs) {
 		if (!enabled) return NO_SCOPE;
 		return region(repository, "hook", name, "max:" + jobs); //$NON-NLS-1$ //$NON-NLS-2$
+	}
+
+	private String commandHierarchy(String command) {
+		return parentCommand == null || parentCommand.isEmpty() ? command
+				: parentCommand + '/' + command;
 	}
 
 	private synchronized int repositoryId(Repository repository) {
@@ -449,7 +457,11 @@ public final class Trace2 implements AutoCloseable {
 		Map<String, Object> f = fields("scope", scope, "param", name); //$NON-NLS-1$ //$NON-NLS-2$
 		if (value != null) {
 			String lower = name.toLowerCase(java.util.Locale.ROOT);
-			f.put("value", lower.matches( //$NON-NLS-1$
+			boolean secretCommand = lower.startsWith("hook.") //$NON-NLS-1$
+					&& lower.endsWith(".command") //$NON-NLS-1$
+					&& value.toLowerCase(java.util.Locale.ROOT).matches(
+							"(?s).*(password|token|authorization|credential|extraheader).*"); //$NON-NLS-1$
+			f.put("value", secretCommand || lower.matches( //$NON-NLS-1$
 					".*(password|token|authorization|credential|extraheader).*") //$NON-NLS-1$
 							? "<redacted>" //$NON-NLS-1$
 							: value.replaceAll("(://)[^/@\\s]+@", //$NON-NLS-1$
@@ -562,6 +574,14 @@ public final class Trace2 implements AutoCloseable {
 			return new Child(null, 0);
 		}
 		builder.environment().put("GIT_TRACE2_PARENT_SID", sid); //$NON-NLS-1$
+		Scope owner = null;
+		for (Scope scope = current.get(); scope != null; scope = scope.parent) {
+			if (scope.command) owner = scope;
+		}
+		if (owner != null) {
+			builder.environment().put("GIT_TRACE2_PARENT_NAME", //$NON-NLS-1$
+					commandHierarchy(owner.label));
+		}
 		File directory = builder.directory();
 		String hookName = null;
 		for (Scope scope = current.get(); scope != null; scope = scope.parent) {

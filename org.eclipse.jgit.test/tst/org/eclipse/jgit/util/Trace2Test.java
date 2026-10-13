@@ -27,10 +27,36 @@ import org.junit.Test;
 
 public class Trace2Test {
 	@Test
+	public void hookChildrenInheritOwningCommandHierarchy() throws Exception {
+		StringWriter out = new StringWriter();
+		try (Trace2 trace = new Trace2(out, false, true, 10, false, null)) {
+			java.lang.reflect.Field parent = Trace2.class
+					.getDeclaredField("parentCommand");
+			parent.setAccessible(true);
+			parent.set(trace, "parent");
+			try (Trace2.Scope command = trace.command(null, "commit", "test");
+					Trace2.Scope nested = trace.command(null, "add", "test")) {
+				ProcessBuilder builder = new ProcessBuilder("git", "version");
+				trace.childStart(builder).exit(1, 0);
+				assertEquals("parent/commit",
+						builder.environment().get("GIT_TRACE2_PARENT_NAME"));
+			}
+		}
+		com.google.gson.JsonObject command = out.toString().lines()
+				.map(line -> com.google.gson.JsonParser.parseString(line)
+						.getAsJsonObject())
+				.filter(event -> event.get("event").getAsString()
+						.equals("cmd_name"))
+				.findFirst().orElseThrow();
+		assertEquals("parent/commit", command.get("hierarchy").getAsString());
+	}
+
+	@Test
 	public void applicationRegionDoesNotHideCommandName() {
 		StringWriter out = new StringWriter();
 		try (Trace2 trace = new Trace2(out, false, false, 10, false, null);
-				Trace2.Scope operation = trace.region(null, "egit", "operation")) {
+				Trace2.Scope operation = trace.region(null, "egit",
+						"operation")) {
 			try (Trace2.Scope outer = trace.command(null, "commit", "egit");
 					Trace2.Scope inner = trace.command(null, "add", "jgit")) {
 				assertTrue(inner.isEnabled());
@@ -59,9 +85,11 @@ public class Trace2Test {
 	@Test
 	public void nestedCommandsShareSession() {
 		StringWriter out = new StringWriter();
-		try (Trace2 trace = new Trace2(out, false, false, 10, false, "parent")) {
+		try (Trace2 trace = new Trace2(out, false, false, 10, false,
+				"parent")) {
 			try (Trace2.Scope outer = trace.command(null, "status", "egit")) {
-				try (Trace2.Scope inner = trace.command(null, "status", "jgit")) {
+				try (Trace2.Scope inner = trace.command(null, "status",
+						"jgit")) {
 					inner.data("outcome", "ok");
 				}
 			}
@@ -77,12 +105,14 @@ public class Trace2Test {
 	}
 
 	@Test
-	public void exceptionUnwindsAndWorkerReuseStartsFreshCommand() throws Exception {
+	public void exceptionUnwindsAndWorkerReuseStartsFreshCommand()
+			throws Exception {
 		StringWriter out = new StringWriter();
 		ExecutorService pool = Executors.newSingleThreadExecutor();
 		try (Trace2 trace = new Trace2(out, false, false, 10, false, null)) {
 			Future<?> first = pool.submit(() -> {
-				try (Trace2.Scope scope = trace.command(null, "status", "first")) {
+				try (Trace2.Scope scope = trace.command(null, "status",
+						"first")) {
 					throw new IllegalStateException("test");
 				} catch (IllegalStateException expected) {
 					// The next job must have no inherited command context.
@@ -90,7 +120,8 @@ public class Trace2Test {
 			});
 			first.get();
 			pool.submit(() -> {
-				try (Trace2.Scope scope = trace.command(null, "status", "second")) {
+				try (Trace2.Scope scope = trace.command(null, "status",
+						"second")) {
 					scope.data("outcome", "cancelled");
 				}
 			}).get();
@@ -110,7 +141,8 @@ public class Trace2Test {
 			Future<?>[] tasks = new Future<?>[40];
 			for (int i = 0; i < tasks.length; i++) {
 				tasks[i] = pool.submit(() -> {
-					try (Trace2.Scope scope = trace.command(null, "status", "worker")) {
+					try (Trace2.Scope scope = trace.command(null, "status",
+							"worker")) {
 						scope.data("outcome", "ok");
 					}
 				});
@@ -163,24 +195,28 @@ public class Trace2Test {
 			final int failure = phase;
 			Writer out = new Writer() {
 				@Override
-				public void write(char[] text, int off, int len) throws IOException {
+				public void write(char[] text, int off, int len)
+						throws IOException {
 					if (failure == 0) {
 						throw new IOException("write");
 					}
 				}
+
 				@Override
 				public void flush() throws IOException {
 					if (failure == 1) {
 						throw new IOException("flush");
 					}
 				}
+
 				@Override
 				public void close() throws IOException {
 					throw new IOException("close");
 				}
 			};
 			try (Trace2 trace = new Trace2(out, true, false, 2, false, null)) {
-				try (Trace2.Scope scope = trace.command(null, "status", "test")) {
+				try (Trace2.Scope scope = trace.command(null, "status",
+						"test")) {
 					scope.data("outcome", "ok");
 				}
 			}

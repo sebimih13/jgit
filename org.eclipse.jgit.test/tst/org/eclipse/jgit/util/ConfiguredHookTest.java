@@ -262,6 +262,7 @@ public class ConfiguredHookTest extends RepositoryTestCase {
 			throws Exception {
 		named("check", "pre-commit", "true;\nexport TOKEN=fixture_secret; :");
 		commit();
+		trace.parameter("local", "hook.check.command", "true;\nexport TOKEN=fixture_secret; :");
 		assertTrue(!events.toString().contains("fixture_secret"));
 	}
 
