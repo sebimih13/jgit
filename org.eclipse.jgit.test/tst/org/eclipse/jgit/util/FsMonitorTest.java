@@ -749,9 +749,15 @@ public class FsMonitorTest extends RepositoryTestCase {
 				global.getAbsolutePath());
 		try (Git git = new Git(db)) {
 			writeTrashFile("tracked", "line\n");
+			java.nio.file.attribute.FileTime trackedTime = java.nio.file.attribute.FileTime
+					.fromMillis(System.currentTimeMillis() - 60_000);
+			Files.setLastModifiedTime(new File(db.getWorkTree(), "tracked").toPath(),
+					trackedTime);
 			git.add().addFilepattern("tracked").call();
 			git.commit().setMessage("base").call();
 			writeTrashFile("tracked", "line\r\n");
+			Files.setLastModifiedTime(new File(db.getWorkTree(), "tracked").toPath(),
+					trackedTime);
 			Status raw = git.status().call();
 			assertEquals(Set.of("tracked"), raw.getModified());
 			java.nio.file.attribute.FileTime originalTime = Files
@@ -761,15 +767,19 @@ public class FsMonitorTest extends RepositoryTestCase {
 			reply("global-changed\0");
 			Status normalized = git.status().call();
 			assertNotSame(raw, normalized);
-			assertTrue(normalized.isClean());
-			assertEquals("",
-					new String(
-							nativeGit(null, "-c",
-									"core.attributesFile="
-											+ global.getAbsolutePath(),
-									"status", "--porcelain=v1", "-z",
-									"--untracked-files=all", "--no-renames"),
-							StandardCharsets.UTF_8));
+			assertEquals(Set.of("tracked"), normalized.getModified());
+			equal(baseline(git), normalized);
+			// Native status trusts the changed raw size here, whereas a full
+			// content comparison normalizes CRLF. Forced checks must preserve
+			// this raw-size decision, matching native and ordinary JGit status.
+			assertEquals(" M tracked\0", new String(nativeGit(null, "-c",
+					"core.attributesFile=" + global.getAbsolutePath(), "status",
+					"--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"),
+					StandardCharsets.UTF_8));
+			assertEquals("", new String(nativeGit(null, "-c",
+					"core.attributesFile=" + global.getAbsolutePath(), "-c",
+					"core.safecrlf=false", "diff", "--exit-code", "--", "tracked"),
+					StandardCharsets.UTF_8));
 			File info = new File(db.getDirectory(), "info/attributes");
 			Files.createDirectories(info.toPath().getParent());
 			Files.writeString(info.toPath(), "tracked -text\n");
@@ -782,15 +792,12 @@ public class FsMonitorTest extends RepositoryTestCase {
 			reply("info-removed\0");
 			Status restored = git.status().call();
 			assertNotSame(overridden, restored);
-			assertTrue(restored.isClean());
-			assertEquals("",
-					new String(
-							nativeGit(null, "-c",
-									"core.attributesFile="
-											+ global.getAbsolutePath(),
-									"status", "--porcelain=v1", "-z",
-									"--untracked-files=all", "--no-renames"),
-							StandardCharsets.UTF_8));
+			assertEquals(Set.of("tracked"), restored.getModified());
+			equal(baseline(git), restored);
+			assertEquals(" M tracked\0", new String(nativeGit(null, "-c",
+					"core.attributesFile=" + global.getAbsolutePath(), "status",
+					"--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"),
+					StandardCharsets.UTF_8));
 		}
 	}
 

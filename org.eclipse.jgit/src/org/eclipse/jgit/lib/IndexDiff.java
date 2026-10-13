@@ -491,10 +491,12 @@ public class IndexDiff {
 		forceContentCheckPaths = java.util.List.copyOf(paths);
 	}
 
-	private void invalidateStatMetadata() {
+	private void configureContentChecks() {
 		if (forceContentCheckPaths.isEmpty()) {
+			initialWorkingTreeIterator.setForceContentCheckEntries(Collections.emptySet());
 			return;
 		}
+		Set<DirCacheEntry> entries = new HashSet<>();
 		boolean all = repository.getConfig().getBoolean("core", null, //$NON-NLS-1$
 				"ignoreCase", false); //$NON-NLS-1$
 		for (String path : forceContentCheckPaths) {
@@ -506,15 +508,16 @@ public class IndexDiff {
 		}
 		if (all) {
 			for (int i = 0; i < dirCache.getEntryCount(); i++) {
-				invalidateStatMetadata(dirCache.getEntry(i));
+				addContentCheckEntry(entries, dirCache.getEntry(i));
 			}
+			initialWorkingTreeIterator.setForceContentCheckEntries(entries);
 			return;
 		}
 		for (String path : forceContentCheckPaths) {
 			String directory = path.endsWith("/") ? path : path + "/"; //$NON-NLS-1$ //$NON-NLS-2$
 			int file = dirCache.findEntry(path);
 			if (file >= 0) {
-				invalidateStatMetadata(dirCache.getEntry(file));
+				addContentCheckEntry(entries, dirCache.getEntry(file));
 			}
 			int start = dirCache.findEntry(directory);
 			if (start < 0) {
@@ -525,16 +528,18 @@ public class IndexDiff {
 				if (!entry.getPathString().startsWith(directory)) {
 					break;
 				}
-				invalidateStatMetadata(entry);
+				addContentCheckEntry(entries, entry);
 			}
 		}
+		initialWorkingTreeIterator.setForceContentCheckEntries(entries);
 	}
 
-	private static void invalidateStatMetadata(DirCacheEntry entry) {
+	private static void addContentCheckEntry(Set<DirCacheEntry> entries,
+			DirCacheEntry entry) {
 		if (entry.getStage() == 0 && !entry.isAssumeValid()
 				&& !entry.isSkipWorkTree()
 				&& entry.getFileMode() != FileMode.GITLINK) {
-			entry.smudgeRacilyClean();
+			entries.add(entry);
 		}
 	}
 
@@ -544,7 +549,7 @@ public class IndexDiff {
 		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
 				"index", "read")) { //$NON-NLS-1$ //$NON-NLS-2$
 			dirCache = repository.readDirCache();
-			invalidateStatMetadata();
+			configureContentChecks();
 		}
 
 		try (TreeWalk treeWalk = new TreeWalk(repository)) {

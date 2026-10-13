@@ -29,10 +29,12 @@ import java.nio.file.Path;
 import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import org.eclipse.jgit.api.errors.FilterFailedException;
 import org.eclipse.jgit.attributes.AttributesNode;
@@ -292,7 +294,8 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 							DirCacheIterator.class);
 			if (i != null) {
 				DirCacheEntry ent = i.getDirCacheEntry();
-				if (ent != null && compareMetadata(ent) == MetadataDiff.EQUAL
+				if (ent != null && !state.forceContentCheckEntries.contains(ent)
+						&& compareMetadata(ent) == MetadataDiff.EQUAL
 						&& ((ent.getFileMode().getBits()
 								& FileMode.TYPE_MASK) != FileMode.TYPE_GITLINK)) {
 					contentIdOffset = i.idOffset();
@@ -960,7 +963,9 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 			// Lets do a content check
 			return contentCheck(entry, reader);
 		case EQUAL:
-			if (mode == FileMode.SYMLINK.getBits()) {
+			if (mode == FileMode.SYMLINK.getBits()
+					|| !entry.isAssumeValid() && !entry.isSkipWorkTree()
+							&& state.forceContentCheckEntries.contains(entry)) {
 				return contentCheck(entry, reader);
 			}
 			return false;
@@ -988,6 +993,19 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 			throw new IllegalStateException(MessageFormat.format(
 					JGitText.get().unexpectedCompareResult, diff.name()));
 		}
+	}
+
+	/**
+	 * Require content comparisons for selected index entries even when their
+	 * stat metadata matches. Size and mode differences retain their normal
+	 * semantics. The selection is shared with subtree iterators.
+	 *
+	 * @param entries
+	 *            entries from the index used by this tree walk, copied on entry
+	 * @since 7.8
+	 */
+	public void setForceContentCheckEntries(Collection<DirCacheEntry> entries) {
+		state.forceContentCheckEntries = Set.copyOf(entries);
 	}
 
 	/**
@@ -1392,6 +1410,7 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 
 
 	private static final class IteratorState {
+		Set<DirCacheEntry> forceContentCheckEntries = Collections.emptySet();
 		/** Options used to process the working tree. */
 		final WorkingTreeOptions options;
 
