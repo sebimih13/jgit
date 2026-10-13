@@ -40,6 +40,7 @@ import org.eclipse.jgit.events.IndexChangedListener;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.storage.file.FileSnapshot;
 import org.eclipse.jgit.internal.storage.file.LockFile;
+import org.eclipse.jgit.internal.storage.file.UntrackedCache;
 import org.eclipse.jgit.internal.storage.io.NullMessageDigest;
 import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.Config;
@@ -78,6 +79,8 @@ public class DirCache {
 	private static final byte[] SIG_DIRC = { 'D', 'I', 'R', 'C' };
 
 	private static final int EXT_TREE = 0x54524545 /* 'TREE' */;
+
+	private static final int EXT_UNTR = 0x554e5452 /* 'UNTR' */;
 
 	private static final DirCacheEntry[] NO_ENTRIES = {};
 
@@ -307,6 +310,8 @@ public class DirCache {
 	/** Cache tree for this index; null if the cache tree is not available. */
 	private DirCacheTree tree;
 
+	private UntrackedCache untrackedCache;
+
 	/** Our active lock (if we hold it); null if we don't have it locked. */
 	private LockFile myLock;
 
@@ -378,7 +383,31 @@ public class DirCache {
 		return version;
 	}
 
+	/**
+	 * Get native untracked-cache extension data. Reading the extension alone
+	 * does not establish that its contents are valid for a current traversal.
+	 *
+	 * @return extension data, or null if absent or malformed
+	 * @since 7.8
+	 */
+	public UntrackedCache getUntrackedCache() {
+		return untrackedCache;
+	}
+
+	/**
+	 * Replace the optional untracked-cache extension.
+	 *
+	 * @param cache validated cache data, or null to omit the extension
+	 * @since 7.8
+	 */
+	public void setUntrackedCache(UntrackedCache cache) {
+		untrackedCache = cache;
+	}
+
 	void replace(DirCacheEntry[] e, int cnt) {
+		if (untrackedCache != null) {
+			untrackedCache.invalidateAll();
+		}
 		sortedEntries = e;
 		entryCnt = cnt;
 		tree = null;
@@ -441,6 +470,7 @@ public class DirCache {
 	 * Empty this index, removing all entries.
 	 */
 	public void clear() {
+		untrackedCache = null;
 		snapshot = null;
 		sortedEntries = NO_ENTRIES;
 		entryCnt = 0;
@@ -527,6 +557,23 @@ public class DirCache {
 				IO.readFully(in, raw, 0, raw.length);
 				md.update(raw, 0, raw.length);
 				tree = new DirCacheTree(raw, new MutableInteger(), null);
+				break;
+			}
+			case EXT_UNTR: {
+				if (sz > UntrackedCache.MAX_EXTENSION_SIZE) {
+					skipOptionalExtension(in, md, hdr, sz);
+					break;
+				}
+				byte[] raw = new byte[(int) sz];
+				IO.readFully(in, raw, 0, raw.length);
+				md.update(raw);
+				try {
+					untrackedCache = UntrackedCache.read(raw);
+				} catch (IOException malformed) {
+					// UNTR is an optional optimization. Invalid cache data
+					// does not change index entries or bypass checksum checks.
+					untrackedCache = null;
+				}
 				break;
 			}
 			default:
@@ -705,6 +752,13 @@ public class DirCache {
 			} finally {
 				bb.destroy();
 			}
+		}
+		if (untrackedCache != null) {
+			byte[] raw = untrackedCache.write();
+			NB.encodeInt32(tmp, 0, EXT_UNTR);
+			NB.encodeInt32(tmp, 4, raw.length);
+			dos.write(tmp, 0, 8);
+			dos.write(raw);
 		}
 		writeIndexChecksum = foot.digest();
 		os.write(writeIndexChecksum);
