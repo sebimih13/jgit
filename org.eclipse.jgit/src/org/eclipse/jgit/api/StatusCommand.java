@@ -10,8 +10,11 @@
 package org.eclipse.jgit.api;
 
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
@@ -24,6 +27,7 @@ import org.eclipse.jgit.submodule.SubmoduleWalk.IgnoreSubmoduleMode;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.WorkingTreeIterator;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.FsMonitor;
 import org.eclipse.jgit.util.Trace2;
 
 /**
@@ -37,8 +41,18 @@ import org.eclipse.jgit.util.Trace2;
  *      documentation about Status</a>
  */
 public class StatusCommand extends GitCommand<Status> {
+	private static final Map<Repository, CachedStatus> MONITORED = new WeakHashMap<>();
+
+	private static class CachedStatus {
+		final FsMonitor.State monitor = new FsMonitor.State();
+
+		WeakReference<Status> result = new WeakReference<>(null);
+	}
+
 	private WorkingTreeIterator workingTreeIt;
+
 	private List<String> paths = null;
+
 	private ProgressMonitor progressMonitor = null;
 
 	private IgnoreSubmoduleMode ignoreSubmoduleMode = null;
@@ -116,7 +130,8 @@ public class StatusCommand extends GitCommand<Status> {
 				Status result = callWithTrace();
 				if (trace.isEnabled()) {
 					trace.data("outcome", progressMonitor != null //$NON-NLS-1$
-							&& progressMonitor.isCancelled() ? "cancelled" : "ok"); //$NON-NLS-1$ //$NON-NLS-2$
+							&& progressMonitor.isCancelled() ? "cancelled" //$NON-NLS-1$
+									: "ok"); //$NON-NLS-1$
 				}
 				return result;
 			} catch (GitAPIException | RuntimeException e) {
@@ -128,6 +143,39 @@ public class StatusCommand extends GitCommand<Status> {
 	}
 
 	private Status callWithTrace() throws GitAPIException, NoWorkTreeException {
+		if (workingTreeIt == null && paths == null
+				&& ignoreSubmoduleMode == null && progressMonitor == null
+				&& FsMonitor.isEnabled(repo)) {
+			CachedStatus cache;
+			synchronized (MONITORED) {
+				cache = MONITORED.computeIfAbsent(repo,
+						r -> new CachedStatus());
+			}
+			synchronized (cache) {
+				FsMonitor.Probe probe = cache.monitor.query(repo);
+				Status previous = cache.result.get();
+				if (probe != null && probe.isUnchanged() && previous != null) {
+					cache.monitor.remember(probe);
+					return previous;
+				}
+				cache.result.clear();
+				try {
+					Status result = scanStatus();
+					cache.monitor.remember(probe);
+					if (probe != null) {
+						cache.result = new WeakReference<>(result);
+					}
+					return result;
+				} catch (GitAPIException | RuntimeException | Error failure) {
+					cache.monitor.clear();
+					throw failure;
+				}
+			}
+		}
+		return scanStatus();
+	}
+
+	private Status scanStatus() throws GitAPIException, NoWorkTreeException {
 		if (workingTreeIt == null)
 			workingTreeIt = new FileTreeIterator(repo);
 

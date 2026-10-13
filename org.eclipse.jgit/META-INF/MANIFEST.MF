@@ -128,6 +128,8 @@ Export-Package: org.eclipse.jgit.annotations;version="7.8.0",
    org.eclipse.jgit.test,
    org.eclipse.jgit.pgm",
  org.eclipse.jgit.internal.submodule;version="7.8.0";x-internal:=true,
+ org.eclipse.jgit.internal.trace2;version="7.8.0";
+  x-friends:="org.eclipse.jgit.test",
  org.eclipse.jgit.internal.transport.connectivity;version="7.8.0";
   x-friends:="org.eclipse.jgit.test",
  org.eclipse.jgit.internal.transport.http;version="7.8.0";
