@@ -141,7 +141,8 @@ public final class Trace2Target implements AutoCloseable {
 			return f.get("name") + " (" + f.get("hierarchy") + ')'; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 		case "region_enter": //$NON-NLS-1$
 		case "region_leave": //$NON-NLS-1$
-			return "label:" + f.get("label"); //$NON-NLS-1$ //$NON-NLS-2$
+			return "label:" + f.get("label") //$NON-NLS-1$ //$NON-NLS-2$
+					+ (f.containsKey("msg") ? " " + f.get("msg") : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 		case "data": //$NON-NLS-1$
 		case "data_json": //$NON-NLS-1$
 			return f.get("key") + ":" + f.get("value"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

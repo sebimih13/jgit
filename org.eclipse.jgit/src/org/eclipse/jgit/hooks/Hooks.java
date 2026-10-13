@@ -10,9 +10,6 @@
 package org.eclipse.jgit.hooks;
 
 import java.io.PrintStream;
-import java.text.MessageFormat;
-
-import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.util.LfsFactory;
 
@@ -22,6 +19,20 @@ import org.eclipse.jgit.util.LfsFactory;
  * @since 4.0
  */
 public class Hooks {
+
+	/**
+	 * Create a prepare-commit-msg hook.
+	 *
+	 * @param repo repository
+	 * @param outputStream hook standard output, or null for System.out
+	 * @param errorStream hook standard error, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PrepareCommitMsgHook prepareCommitMsg(Repository repo,
+			PrintStream outputStream, PrintStream errorStream) {
+		return new PrepareCommitMsgHook(repo, outputStream, errorStream);
+	}
 
 	/**
 	 * Create pre-commit hook for the given repository with the default error
@@ -137,12 +148,7 @@ public class Hooks {
 					outputStream);
 			if (hook != null) {
 				if (hook.isNativeHookPresent()) {
-					PrintStream ps = outputStream;
-					if (ps == null) {
-						ps = System.out;
-					}
-					ps.println(MessageFormat
-							.format(JGitText.get().lfsHookConflict, repo));
+					return new PrePushHook(repo, outputStream);
 				}
 				return hook;
 			}
@@ -169,12 +175,7 @@ public class Hooks {
 					outputStream, errorStream);
 			if (hook != null) {
 				if (hook.isNativeHookPresent()) {
-					PrintStream ps = outputStream;
-					if (ps == null) {
-						ps = System.out;
-					}
-					ps.println(MessageFormat
-							.format(JGitText.get().lfsHookConflict, repo));
+					return new PrePushHook(repo, outputStream, errorStream);
 				}
 				return hook;
 			}

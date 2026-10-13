@@ -36,6 +36,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -46,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -68,6 +70,7 @@ import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.storage.file.FileSnapshot;
 import org.eclipse.jgit.internal.util.ShutdownHook;
 import org.eclipse.jgit.lib.Config;
+import org.eclipse.jgit.lib.HookConfig;
 import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Repository;
@@ -1933,17 +1936,302 @@ public abstract class FS {
 			String hookName, String[] args, OutputStream outRedirect,
 			OutputStream errRedirect, String stdinArgs)
 			throws JGitInternalException {
-		File hookFile = findHook(repository, hookName);
-		if (hookFile == null || hookName == null) {
+
+		if (hookName == null) {
 			return new ProcessResult(Status.NOT_PRESENT);
 		}
-
+		HookConfig config = repository.getConfig().get(HookConfig.KEY);
+		List<HookConfig.Command> configured = config.getCommands(hookName);
+		File hookFile = findHook(repository, hookName);
+		if (hookFile == null && configured.isEmpty()) {
+			return new ProcessResult(Status.NOT_PRESENT);
+		}
 		File runDirectory = getRunDirectory(repository, hookName);
 		if (runDirectory == null) {
 			return new ProcessResult(Status.NOT_PRESENT);
 		}
-		String cmd = hookFile.getAbsolutePath();
-		ProcessBuilder hookProcess = runInShell(shellQuote(cmd), args);
+		List<String> commands = new ArrayList<>();
+		for (HookConfig.Command command : configured) {
+			if (command.enabled()) {
+				commands.add(command.command());
+			}
+		}
+		if (hookFile != null) {
+			commands.add(shellQuote(hookFile.getAbsolutePath()));
+		}
+		Trace2 tracer = Trace2.peekInstance();
+		if (tracer == null) {
+			tracer = Trace2.getInstance();
+		}
+		int jobs = hookJobs(config, hookName);
+		try (Trace2.Scope hook = tracer.hook(repository, hookName, jobs)) {
+			if (jobs > 1 && commands.size() > 1) {
+				return new ProcessResult(runHooksParallel(repository, hookName,
+						args, stdinArgs, errRedirect, runDirectory, commands,
+						jobs, tracer, hook), Status.OK);
+			}
+			int result = 0;
+			for (String command : commands) {
+				// An empty command must fail to start, as in C Git.
+				ProcessBuilder hookProcess = command.isEmpty()
+						? new ProcessBuilder(command)
+						: runInShell(command, args);
+				configureHookProcess(repository, hookName, hookProcess,
+						runDirectory);
+				hook.hookProcess(hookProcess);
+				result |= runProcess(hookProcess, outRedirect, errRedirect,
+						stdinArgs);
+			}
+			return new ProcessResult(result, Status.OK);
+		} catch (IOException e) {
+			throw new JGitInternalException(MessageFormat.format(
+					JGitText.get().exceptionCaughtDuringExecutionOfHook,
+					hookName), e);
+		} catch (InterruptedException e) {
+			throw new JGitInternalException(MessageFormat.format(
+					JGitText.get().exceptionHookExecutionInterrupted, hookName),
+					e);
+		}
+	}
+
+	private static int hookJobs(HookConfig config, String name) {
+		switch (name) {
+		case "applypatch-msg": //$NON-NLS-1$
+		case "pre-commit": //$NON-NLS-1$
+		case "pre-merge-commit": //$NON-NLS-1$
+		case "prepare-commit-msg": //$NON-NLS-1$
+		case "commit-msg": //$NON-NLS-1$
+		case "post-commit": //$NON-NLS-1$
+		case "post-checkout": //$NON-NLS-1$
+		case "push-to-checkout": //$NON-NLS-1$
+			return 1;
+		default:
+			return config.getJobs(name);
+		}
+	}
+
+	private static final class RunningHook {
+		final Process process;
+
+		final Trace2.Child child;
+
+		final TemporaryBuffer output;
+
+		final Future<?> reader;
+
+		final Future<?> writer;
+
+		final CompletableFuture<Void> completion;
+
+		final int slot;
+
+		RunningHook(Process process, Trace2.Child child, TemporaryBuffer output,
+				CompletableFuture<?> reader, CompletableFuture<?> writer,
+				int slot) {
+			this.process = process;
+			this.child = child;
+			this.output = output;
+			this.reader = reader;
+			this.writer = writer;
+			this.slot = slot;
+			completion = CompletableFuture.allOf(process.onExit(), reader,
+					writer);
+		}
+	}
+
+	private int runHooksParallel(Repository repository, String name,
+			String[] args, String stdin, OutputStream errors, File directory,
+			List<String> commands, int jobs, Trace2 tracer, Trace2.Scope scope)
+			throws IOException, InterruptedException {
+		int capacity = Math.min(jobs, commands.size());
+		ExecutorService io = Executors.newFixedThreadPool(capacity * 2);
+		List<RunningHook> active = new ArrayList<>();
+		List<RunningHook> all = new ArrayList<>();
+		CompletableFuture<IOException> readerFailure = new CompletableFuture<>();
+		RunningHook[] slots = new RunningHook[capacity];
+		List<RunningHook> deferred = new ArrayList<>();
+		int outputOwner = 0;
+		int next = 0;
+		int result = 0;
+		try {
+			while (next < commands.size() || !active.isEmpty()) {
+				while (next < commands.size() && active.size() < capacity) {
+					String command = commands.get(next++);
+					ProcessBuilder builder = command.isEmpty()
+							? new ProcessBuilder(command)
+							: runInShell(command, args);
+					configureHookProcess(repository, name, builder, directory);
+					builder.redirectErrorStream(true);
+					scope.hookProcess(builder);
+					Trace2.Child child = tracer.isEnabled()
+							? tracer.childStart(builder)
+							: null;
+					Process process;
+					try {
+						process = builder.start();
+					} catch (IOException failure) {
+						if (child != null)
+							child.exit(-1, -1);
+						throw failure;
+					}
+					TemporaryBuffer output = new TemporaryBuffer.LocalFile(
+							null);
+					CompletableFuture<?> reader = CompletableFuture
+							.runAsync(() -> {
+								try {
+									new StreamGobbler(process.getInputStream(),
+											output).copy();
+								} catch (IOException failure) {
+									readerFailure
+											.completeExceptionally(failure);
+									throw new java.io.UncheckedIOException(
+											failure);
+								}
+							}, io);
+					CompletableFuture<?> writer = CompletableFuture
+							.runAsync(() -> {
+								try (OutputStream input = process
+										.getOutputStream()) {
+									if (stdin != null) {
+										new StreamGobbler(
+												new ByteArrayInputStream(
+														stdin.getBytes(UTF_8)),
+												input).copy();
+									}
+								} catch (IOException failure) {
+									// Early stdin closure must not replace the
+									// hook result.
+								}
+							}, io);
+					int slot = 0;
+					while (slots[slot] != null)
+						slot++;
+					RunningHook running = new RunningHook(process, child,
+							output, reader, writer, slot);
+					slots[slot] = running;
+					active.add(running);
+					active.sort(java.util.Comparator
+							.comparingInt(task -> task.slot));
+					all.add(running);
+				}
+				try {
+					List<CompletableFuture<?>> completion = new ArrayList<>();
+					active.forEach(task -> completion.add(task.completion));
+					completion.add(readerFailure);
+					CompletableFuture
+							.anyOf(completion.toArray(CompletableFuture[]::new))
+							.get();
+				} catch (ExecutionException failure) {
+					throw new IOException(failure.getCause());
+				}
+				for (int i = 0; i < active.size();) {
+					RunningHook task = active.get(i);
+					if (!task.completion.isDone()) {
+						i++;
+						continue;
+					}
+					awaitHookIO(task.reader);
+					awaitHookIO(task.writer);
+					int code = task.process.exitValue();
+					if (task.child != null)
+						task.child.exit(task.process.pid(), code);
+					result |= code;
+					task.output.close();
+					// C Git merges parallel hook stdout/stderr and prevents
+					// interleaving. LocalFile bounds memory while retaining
+					// output.
+					slots[task.slot] = null;
+					if (task.slot != outputOwner) {
+						deferred.add(task);
+					} else {
+						flushHookOutput(task, errors);
+						for (RunningHook buffered : deferred)
+							flushHookOutput(buffered, errors);
+						deferred.clear();
+						for (int shift = 0; shift < capacity; shift++) {
+							int candidate = (outputOwner + shift) % capacity;
+							if (slots[candidate] != null
+									&& !slots[candidate].reader.isDone()) {
+								outputOwner = candidate;
+								break;
+							}
+						}
+					}
+					active.remove(i);
+				}
+			}
+			for (RunningHook buffered : deferred)
+				flushHookOutput(buffered, errors);
+			return result;
+		} catch (InterruptedException interruption) {
+			Thread.currentThread().interrupt();
+			throw interruption;
+		} finally {
+			boolean interrupted = Thread.interrupted();
+			for (RunningHook task : all) {
+				try {
+					if (task.process.isAlive()) {
+						task.process.descendants()
+								.forEach(child -> child.destroyForcibly());
+						task.process.destroyForcibly();
+						task.process.waitFor();
+					}
+					if (task.child != null)
+						task.child.exit(task.process.pid(),
+								task.process.exitValue());
+				} catch (InterruptedException interruption) {
+					interrupted = true;
+				} finally {
+					try {
+						task.process.getInputStream().close();
+					} catch (IOException ignored) {
+						/* Preserve original failure. */ }
+					try {
+						task.process.getErrorStream().close();
+					} catch (IOException ignored) {
+						/* Preserve original failure. */ }
+					try {
+						task.process.getOutputStream().close();
+					} catch (IOException ignored) {
+						/* Preserve original failure. */ }
+				}
+			}
+			io.shutdownNow();
+			// Readers must have stopped before their spool is destroyed.
+			while (!io.isTerminated()) {
+				try {
+					io.awaitTermination(1, TimeUnit.SECONDS);
+				} catch (InterruptedException interruption) {
+					interrupted = true;
+				}
+			}
+			all.forEach(task -> task.output.destroy());
+			if (interrupted)
+				Thread.currentThread().interrupt();
+		}
+	}
+
+	private static void flushHookOutput(RunningHook task,
+			OutputStream destination) throws IOException {
+		if (destination != null)
+			task.output.writeTo(destination, null);
+		task.output.destroy();
+	}
+
+	private static void awaitHookIO(Future<?> future)
+			throws IOException, InterruptedException {
+		try {
+			future.get();
+		} catch (ExecutionException failure) {
+			Throwable cause = failure.getCause();
+			if (cause instanceof java.io.UncheckedIOException io)
+				throw io.getCause();
+			throw new IOException(cause);
+		}
+	}
+
+	private void configureHookProcess(Repository repository, String hookName,
+			ProcessBuilder hookProcess, File runDirectory) {
 		hookProcess.directory(runDirectory.getAbsoluteFile());
 		Map<String, String> environment = hookProcess.environment();
 		environment.put(Constants.GIT_DIR_KEY,
@@ -1954,23 +2242,22 @@ public abstract class FS {
 			environment.put(Constants.GIT_WORK_TREE_KEY,
 					repository.getWorkTree().getAbsolutePath());
 		}
-		Trace2 tracer = Trace2.peekInstance();
-		if (tracer == null) {
-			tracer = Trace2.getInstance();
-		}
-		try (Trace2.Scope hook = tracer.hook(repository, hookName, hookProcess)) {
-			return new ProcessResult(runProcess(hookProcess, outRedirect,
-					errRedirect, stdinArgs), Status.OK);
-		} catch (IOException e) {
-			throw new JGitInternalException(MessageFormat.format(
-					JGitText.get().exceptionCaughtDuringExecutionOfHook,
-					hookName), e);
-		} catch (InterruptedException e) {
-			throw new JGitInternalException(MessageFormat.format(
-					JGitText.get().exceptionHookExecutionInterrupted,
-							hookName), e);
+		switch (hookName) {
+		case "pre-commit": //$NON-NLS-1$
+		case "pre-merge-commit": //$NON-NLS-1$
+		case "prepare-commit-msg": //$NON-NLS-1$
+		case "commit-msg": //$NON-NLS-1$
+		case "post-commit": //$NON-NLS-1$
+			// JGit's commit API does not launch an editor.
+			environment.put("GIT_EDITOR", ":"); //$NON-NLS-1$ //$NON-NLS-2$
+			environment.put("GIT_INDEX_FILE", //$NON-NLS-1$
+					repository.getIndexFile().getAbsolutePath());
+			break;
+		default:
+			break;
 		}
 	}
+
 
 	/**
 	 * Quote a string (such as a file system path obtained from a Java

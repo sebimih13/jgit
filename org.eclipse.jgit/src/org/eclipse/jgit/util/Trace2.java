@@ -288,7 +288,7 @@ public final class Trace2 implements AutoCloseable {
 		for (String arg : argv) {
 			String lower = arg.toLowerCase(java.util.Locale.ROOT);
 			boolean secret = lower
-					.matches(".*(password|token|authorization|credential).*"); //$NON-NLS-1$
+					.matches("(?s).*(password|token|authorization|credential).*"); //$NON-NLS-1$
 			result.add(redactNext || secret ? "<redacted>" //$NON-NLS-1$
 					: arg.replaceAll("(://)[^/@\\s]+@", "$1<redacted>@")); //$NON-NLS-1$ //$NON-NLS-2$
 			redactNext = secret && !arg.contains("="); //$NON-NLS-1$
@@ -339,13 +339,20 @@ public final class Trace2 implements AutoCloseable {
 	 * @return thread-confined operation scope
 	 */
 	public Scope region(Repository repository, String category, String label) {
+		return region(repository, category, label, null);
+	}
+
+	private Scope region(Repository repository, String category, String label,
+			String message) {
 		if (!enabled) {
 			return NO_SCOPE;
 		}
 		Scope scope = new Scope(this, current.get(), repositoryId(repository),
 				category, label);
 		current.set(scope);
-		emit("region_enter", scope.fields()); //$NON-NLS-1$
+		Map<String, Object> entry = scope.fields();
+		if (message != null) entry.put("msg", message); //$NON-NLS-1$
+		emit("region_enter", entry); //$NON-NLS-1$
 		return scope;
 	}
 
@@ -356,6 +363,11 @@ public final class Trace2 implements AutoCloseable {
 			scope.hookProcess = builder;
 		}
 		return scope;
+	}
+
+	Scope hook(Repository repository, String name, int jobs) {
+		if (!enabled) return NO_SCOPE;
+		return region(repository, "hook", name, "max:" + jobs); //$NON-NLS-1$ //$NON-NLS-2$
 	}
 
 	private synchronized int repositoryId(Repository repository) {
@@ -822,6 +834,12 @@ public final class Trace2 implements AutoCloseable {
 		private boolean command;
 
 		private ProcessBuilder hookProcess;
+
+		void hookProcess(ProcessBuilder builder) {
+			if (isEnabled()) {
+				hookProcess = builder;
+			}
+		}
 
 		private Scope() {
 			trace = null;

@@ -91,11 +91,16 @@ public class LfsPrePushHook extends PrePushHook {
 
 	@Override
 	public void setRefs(Collection<RemoteRefUpdate> toRefs) {
+		super.setRefs(toRefs);
 		this.refs = toRefs;
 	}
 
 	@Override
 	public String call() throws IOException, AbortedByHookException {
+		super.call();
+		if (isNativeHookPresent()) {
+			return EMPTY;
+		}
 		Set<LfsPointer> toPush = findObjectsToPush();
 		if (toPush.isEmpty()) {
 			return EMPTY;
