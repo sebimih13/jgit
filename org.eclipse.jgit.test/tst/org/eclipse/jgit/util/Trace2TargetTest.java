@@ -70,7 +70,7 @@ public class Trace2TargetTest {
 			scope.dataJson("metrics",
 					Map.of("n", Integer.valueOf(4), "ok", Boolean.TRUE));
 			assertThrows(IllegalArgumentException.class,
-					() -> scope.dataJson("bad", Double.NaN));
+					() -> scope.dataJson("bad", Double.valueOf(Double.NaN)));
 		}
 		assertTrue(event.toString().contains("\"n\":4"));
 		assertTrue(event.toString().contains("\"ok\":true"));
