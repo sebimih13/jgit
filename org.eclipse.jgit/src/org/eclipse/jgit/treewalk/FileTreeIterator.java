@@ -21,13 +21,17 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
+import java.util.Map;
 
+import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectReader;
+import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.util.FS;
+import org.eclipse.jgit.util.FS_POSIX;
 
 /**
  * Working directory iterator for standard Java IO.
@@ -43,6 +47,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 * in this directory.
 	 */
 	protected final File directory;
+
+	private IndexPreloader preloaded;
 
 	/**
 	 * the file system abstraction which will be necessary to perform certain
@@ -171,6 +177,9 @@ public class FileTreeIterator extends WorkingTreeIterator {
 		directory = root;
 		this.fs = fs;
 		this.fileModeStrategy = fileModeStrategy;
+		if (p instanceof FileTreeIterator) {
+			preloaded = ((FileTreeIterator) p).preloaded;
+		}
 		init(entries());
 	}
 
@@ -202,8 +211,47 @@ public class FileTreeIterator extends WorkingTreeIterator {
 				fileModeStrategy);
 	}
 
+	/**
+	 * Preload tracked metadata for this walk when core.preloadIndex is
+	 * explicitly enabled. The index is not modified. Metadata is discarded with
+	 * this walk; existing content and racy-timestamp checks still apply.
+	 *
+	 * @param index
+	 *            already loaded index
+	 * @param monitor
+	 *            cancellation monitor, or null
+	 * @since 7.8
+	 */
+	public void preloadIndex(DirCache index, ProgressMonitor monitor) {
+		preloaded = null;
+		Repository repo = getRepository();
+		// Preserve custom FS.list implementations and Win32 enumeration,
+		// which already supplies file attributes.
+		if (repo != null && fs.getClass() == FS_POSIX.class && repo.getConfig()
+				.getBoolean("core", null, "preloadIndex", false)) { //$NON-NLS-1$ //$NON-NLS-2$
+			preloaded = IndexPreloader.load(repo, fs, index, monitor);
+		}
+	}
+
 	private Entry[] entries() {
-		return fs.list(directory, fileModeStrategy);
+		Map<String, FS.Attributes> attributes = preloaded == null ? null
+				: preloaded.takeDirectory(directory);
+		if (attributes == null) {
+			return fs.list(directory, fileModeStrategy);
+		}
+		File[] files = directory.listFiles();
+		if (files == null) {
+			return new Entry[0];
+		}
+		Entry[] result = new Entry[files.length];
+		for (int i = 0; i < files.length; i++) {
+			File file = fs.normalize(files[i]);
+			FS.Attributes cached = attributes.get(file.getName());
+			result[i] = cached == null
+					? new FileEntry(file, fs, fileModeStrategy)
+					: new FileEntry(file, fs, cached, fileModeStrategy);
+		}
+		return result;
 	}
 
 	/**

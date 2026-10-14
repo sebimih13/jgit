@@ -62,6 +62,7 @@ import org.eclipse.jgit.storage.pack.PackConfig;
 import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.EmptyTreeIterator;
+import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.WorkingTreeIterator;
 import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
@@ -505,6 +506,17 @@ public class DiffFormatter implements AutoCloseable {
 			throws IOException {
 		assertHaveReader();
 
+		if (pathFilter == TreeFilter.ALL) {
+			if (a instanceof FileTreeIterator
+					&& b instanceof DirCacheIterator) {
+				((FileTreeIterator) a).preloadIndex(
+						((DirCacheIterator) b).getDirCache(), progressMonitor);
+			} else if (b instanceof FileTreeIterator
+					&& a instanceof DirCacheIterator) {
+				((FileTreeIterator) b).preloadIndex(
+						((DirCacheIterator) a).getDirCache(), progressMonitor);
+			}
+		}
 		TreeWalk walk = new TreeWalk(repository, reader);
 		int aIndex = walk.addTree(a);
 		int bIndex = walk.addTree(b);

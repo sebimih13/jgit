@@ -551,6 +551,11 @@ public class IndexDiff {
 			dirCache = repository.readDirCache();
 			configureContentChecks();
 		}
+		if (filter == null
+				&& initialWorkingTreeIterator instanceof FileTreeIterator) {
+			((FileTreeIterator) initialWorkingTreeIterator)
+					.preloadIndex(dirCache, monitor);
+		}
 
 		try (TreeWalk treeWalk = new TreeWalk(repository)) {
 			treeWalk.setOperationType(OperationType.CHECKIN_OP);

@@ -310,6 +310,9 @@ public class DirCacheCheckout {
 	 *             if an IO error occurred
 	 */
 	public void preScanTwoTrees() throws CorruptObjectException, IOException {
+		if (workingTree instanceof FileTreeIterator) {
+			((FileTreeIterator) workingTree).preloadIndex(dc, monitor);
+		}
 		removed.clear();
 		updated.clear();
 		conflicts.clear();
@@ -345,9 +348,11 @@ public class DirCacheCheckout {
 	 * @throws java.io.IOException
 	 *             if an IO error occurred
 	 */
-	public void prescanOneTree()
-			throws MissingObjectException, IncorrectObjectTypeException,
-			CorruptObjectException, IOException {
+	public void prescanOneTree() throws MissingObjectException,
+			IncorrectObjectTypeException, CorruptObjectException, IOException {
+		if (workingTree instanceof FileTreeIterator) {
+			((FileTreeIterator) workingTree).preloadIndex(dc, monitor);
+		}
 		removed.clear();
 		updated.clear();
 		conflicts.clear();

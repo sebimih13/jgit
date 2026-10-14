@@ -104,6 +104,16 @@ public class DirCacheIterator extends AbstractTreeIterator {
 		parseEntry();
 	}
 
+	/**
+	 * Get the index backing this iterator.
+	 *
+	 * @return the already loaded index
+	 * @since 7.8
+	 */
+	public DirCache getDirCache() {
+		return cache;
+	}
+
 	@Override
 	public AbstractTreeIterator createSubtreeIterator(ObjectReader reader)
 			throws IncorrectObjectTypeException, IOException {
