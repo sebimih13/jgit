@@ -62,6 +62,7 @@ import org.eclipse.jgit.lib.CommitConfig;
 import org.eclipse.jgit.lib.CommitConfig.CleanupMode;
 import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectReader;
@@ -1195,6 +1196,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 					JGitText.get().resettingHead,
 					upstreamCommit.getShortMessage()), ProgressMonitor.UNKNOWN);
 			checkoutCommit(headName, upstreamCommit);
+			Hooks.postCheckout(repo, headCommit, upstreamCommit, true, null, null).call();
 			monitor.endTask();
 
 			updateHead(headName, upstreamCommit, upstream);
@@ -1241,6 +1243,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 		boolean checkoutOk = false;
 		try {
 			checkoutOk = checkoutCommit(headName, upstreamCommit);
+			Hooks.postCheckout(repo, headCommit, upstreamCommit, true, null, null).call();
 		} finally {
 			if (!checkoutOk)
 				FileUtils.delete(rebaseState.getDir(), FileUtils.RECURSIVE);

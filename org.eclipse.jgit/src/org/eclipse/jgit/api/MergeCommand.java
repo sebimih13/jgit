@@ -22,6 +22,7 @@ import java.util.Map;
 
 import org.eclipse.jgit.annotations.Nullable;
 import org.eclipse.jgit.api.MergeResult.MergeStatus;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.api.errors.CheckoutConflictException;
 import org.eclipse.jgit.api.errors.ConcurrentRefUpdateException;
 import org.eclipse.jgit.api.errors.GitAPIException;
@@ -327,6 +328,7 @@ public class MergeCommand extends GitCommand<MergeResult> {
 					repo.writeSquashCommitMsg(squashMessage);
 				}
 				setCallable(false);
+				Hooks.postMerge(repo, squash.booleanValue(), null, null).call();
 				return new MergeResult(newHead, base, new ObjectId[] {
 						headCommit, srcCommit }, mergeStatus, mergeStrategy,
 						null, msg);
@@ -413,6 +415,9 @@ public class MergeCommand extends GitCommand<MergeResult> {
 						newHeadId = headCommit.getId();
 						mergeStatus = MergeStatus.MERGED_SQUASHED;
 					}
+					if (squash.booleanValue() || commit.booleanValue()) {
+						Hooks.postMerge(repo, squash.booleanValue(), null, null).call();
+					}
 					return new MergeResult(newHeadId, null,
 							new ObjectId[] { headCommit.getId(),
 									srcCommit.getId() }, mergeStatus,
@@ -433,6 +438,9 @@ public class MergeCommand extends GitCommand<MergeResult> {
 						.formatWithConflicts(mergeMessage, unmergedPaths,
 								commentChar);
 				repo.writeMergeCommitMsg(mergeMessageWithConflicts);
+				if (squash.booleanValue()) {
+					Hooks.postMerge(repo, true, null, null).call();
+				}
 				return new MergeResult(null, merger.getBaseCommitId(),
 						new ObjectId[] { headCommit.getId(),
 								srcCommit.getId() },

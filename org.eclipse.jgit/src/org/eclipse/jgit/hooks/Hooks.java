@@ -11,6 +11,7 @@ package org.eclipse.jgit.hooks;
 
 import java.io.PrintStream;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.util.LfsFactory;
 
 /**
@@ -19,6 +20,36 @@ import org.eclipse.jgit.util.LfsFactory;
  * @since 4.0
  */
 public class Hooks {
+
+	/**
+	 * Create a post-merge notification.
+	 * @param repo repository
+	 * @param squash whether the merge was squashed
+	 * @param output hook output, or null to use System.err
+	 * @param error hook error output, or null to use System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PostMergeHook postMerge(Repository repo, boolean squash,
+			PrintStream output, PrintStream error) {
+		return new PostMergeHook(repo, squash, output, error);
+	}
+
+	/**
+	 * Create a post-checkout notification.
+	 * @param repo repository
+	 * @param oldHead previous HEAD, or null for an unborn HEAD
+	 * @param newHead checked-out commit, or null for an unborn HEAD
+	 * @param branch true for a branch/commit checkout, false for paths
+	 * @param output hook stdout, or null for stderr
+	 * @param error hook stderr, or null for stderr
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PostCheckoutHook postCheckout(Repository repo, ObjectId oldHead,
+			ObjectId newHead, boolean branch, PrintStream output, PrintStream error) {
+		return new PostCheckoutHook(repo, oldHead, newHead, branch, output, error);
+	}
 
 	/**
 	 * Create a prepare-commit-msg hook.

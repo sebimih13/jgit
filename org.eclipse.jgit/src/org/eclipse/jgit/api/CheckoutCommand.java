@@ -41,6 +41,7 @@ import org.eclipse.jgit.events.WorkingTreeModifiedEvent;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.lib.CoreConfig.EolStreamType;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.NullProgressMonitor;
@@ -193,10 +194,12 @@ public class CheckoutCommand extends GitCommand<Ref> {
 		checkCallable();
 		try {
 			processOptions();
+			ObjectId previousHead = repo.resolve(Constants.HEAD);
 			if (checkoutAllPaths || !paths.isEmpty()) {
 				checkoutPaths();
 				status = new CheckoutResult(Status.OK, paths);
 				setCallable(false);
+				Hooks.postCheckout(repo, previousHead, previousHead, false, null, null).call();
 				return null;
 			}
 
@@ -321,6 +324,7 @@ public class CheckoutCommand extends GitCommand<Ref> {
 				status = new CheckoutResult(new ArrayList<>(dco
 						.getUpdated().keySet()), dco.getRemoved());
 
+			Hooks.postCheckout(repo, previousHead, newCommit, true, null, null).call();
 			return ref;
 		} catch (IOException ioe) {
 			throw new JGitInternalException(ioe.getMessage(), ioe);

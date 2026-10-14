@@ -11,6 +11,10 @@ package org.eclipse.jgit.api;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.LinkOption;
+import java.nio.file.StandardCopyOption;
 import java.text.MessageFormat;
 import java.util.concurrent.Callable;
 
@@ -37,6 +41,8 @@ import org.eclipse.jgit.util.Trace2;
  */
 public class InitCommand implements Callable<Git> {
 	private File directory;
+
+	private File templateDirectory;
 
 	private File gitDir;
 
@@ -119,6 +125,7 @@ public class InitCommand implements Callable<Git> {
 							ConfigConstants.CONFIG_INIT_SECTION, null,
 							ConfigConstants.CONFIG_KEY_DEFAULT_BRANCH)
 					: initialBranch);
+			copyTemplates(builder.getGitDir());
 			Repository repository = builder.build();
 			if (!repository.getObjectDatabase().exists())
 				if (repository instanceof FileRepository) {
@@ -129,6 +136,47 @@ public class InitCommand implements Callable<Git> {
 			return new Git(repository, true);
 		} catch (IOException | ConfigInvalidException e) {
 			throw new JGitInternalException(e.getMessage(), e);
+		}
+	}
+
+	/**
+	 * Set the repository template directory.
+	 * @param directory templates, or null for environment/config defaults
+	 * @return this command
+	 * @since 7.8
+	 */
+	public InitCommand setTemplateDirectory(File directory) {
+		templateDirectory = directory;
+		return this;
+	}
+
+	private void copyTemplates(File destination) throws IOException, ConfigInvalidException {
+		String configured = templateDirectory != null ? templateDirectory.getPath()
+				: SystemReader.getInstance().getenv("GIT_TEMPLATE_DIR"); //$NON-NLS-1$
+		if (configured == null) {
+			configured = SystemReader.getInstance().getUserConfig().getString("init", null, "templateDir"); //$NON-NLS-1$ //$NON-NLS-2$
+		}
+		if (configured == null || configured.isEmpty()) return;
+		Path source = new File(configured).toPath();
+		if (!Files.isDirectory(source)) return;
+		Path root = source.toRealPath();
+		try (var files = Files.walk(root)) {
+			for (Path file : files.toList()) {
+				Path relative = root.relativize(file);
+				boolean hidden = false;
+				for (Path part : relative) {
+					if (part.toString().startsWith(".")) hidden = true; //$NON-NLS-1$
+				}
+				if (hidden) continue;
+				Path target = destination.toPath().resolve(relative);
+				if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) continue;
+				if (Files.isDirectory(file, LinkOption.NOFOLLOW_LINKS)) {
+					Files.createDirectories(target);
+				} else {
+					Files.createDirectories(target.getParent());
+					Files.copy(file, target, LinkOption.NOFOLLOW_LINKS, StandardCopyOption.COPY_ATTRIBUTES);
+				}
+			}
 		}
 	}
 
