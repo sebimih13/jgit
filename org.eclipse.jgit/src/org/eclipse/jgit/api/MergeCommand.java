@@ -201,6 +201,8 @@ public class MergeCommand extends GitCommand<MergeResult> {
 
 	private Boolean commit;
 
+	private boolean noVerify;
+
 	/**
 	 * Constructor for MergeCommand.
 	 *
@@ -403,6 +405,8 @@ public class MergeCommand extends GitCommand<MergeResult> {
 					if (commit && !squash) {
 						try (Git git = new Git(getRepository())) {
 							newHeadId = git.commit()
+									.setAutomaticMerge(true)
+									.setNoVerify(noVerify)
 									.setReflogComment(refLogMessage.toString())
 									.setInsertChangeId(insertChangeId)
 									.call().getId();
@@ -665,6 +669,20 @@ public class MergeCommand extends GitCommand<MergeResult> {
 	 */
 	public MergeCommand setMessage(String message) {
 		this.message = message;
+		return this;
+	}
+
+	/**
+	 * Bypass pre-merge-commit and commit-msg verification.
+	 *
+	 * @param noVerify
+	 *            whether to bypass verification
+	 * @return this command
+	 * @since 7.8
+	 */
+	public MergeCommand setNoVerify(boolean noVerify) {
+		checkCallable();
+		this.noVerify = noVerify;
 		return this;
 	}
 

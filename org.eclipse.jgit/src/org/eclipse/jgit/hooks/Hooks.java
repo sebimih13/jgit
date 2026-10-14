@@ -22,6 +22,58 @@ import org.eclipse.jgit.util.LfsFactory;
 public class Hooks {
 
 	/**
+	 * Create a post-rewrite notification.
+	 *
+	 * @param repo repository
+	 * @param command rewrite command
+	 * @param rewritten newline-terminated old/new object pairs
+	 * @param output hook stdout, or null to use System.err
+	 * @param error hook stderr, or null to use System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PostRewriteHook postRewrite(Repository repo, String command,
+			String rewritten, PrintStream output, PrintStream error) {
+		return new PostRewriteHook(repo, command, rewritten, output, error);
+	}
+
+
+	/**
+	 * Create a pre-rebase verification hook.
+	 *
+	 * @param repo repository
+	 * @param upstream original upstream argument
+	 * @param branch explicit branch, or null for current HEAD
+	 * @param output hook stdout, or null to use System.err
+	 * @param error hook stderr, or null to use System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PreRebaseHook preRebase(Repository repo, String upstream,
+			String branch, PrintStream output, PrintStream error) {
+		return new PreRebaseHook(repo, upstream, branch, output, error);
+	}
+
+
+	/**
+	 * Create a pre-merge-commit hook.
+	 *
+	 * @param repo
+	 *            repository
+	 * @param output
+	 *            hook stdout, or null to use System.err
+	 * @param error
+	 *            hook stderr, or null to use System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PreMergeCommitHook preMergeCommit(Repository repo,
+			PrintStream output, PrintStream error) {
+		return new PreMergeCommitHook(repo, output, error);
+	}
+
+
+	/**
 	 * Create a post-merge notification.
 	 * @param repo repository
 	 * @param squash whether the merge was squashed

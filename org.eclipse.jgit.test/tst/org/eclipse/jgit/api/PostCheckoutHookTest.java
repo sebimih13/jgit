@@ -76,27 +76,27 @@ public class PostCheckoutHookTest extends RepositoryTestCase {
 	}
 
 	@Test
-	public void targetBranchCheckoutThenUpToDateRebaseMatchesNativeBranchScenario()
+	public void targetBranchRebaseMatchesNativeBranchScenario()
 			throws Exception {
 		git.branchCreate().setName("rebase-fast-forward").setStartPoint("three")
 				.call();
 		git.checkout().setName("two").call();
 		Files.delete(args.toPath());
-		git.checkout().setName("rebase-fast-forward").call();
-		git.rebase().setUpstream(two).call();
+		git.rebase().setUpstream("HEAD").setBranch("rebase-fast-forward").call();
 		check(two, three, true);
 	}
 
 	@Test
-	public void targetBranchCheckoutForRebaseDoesNotOverwriteUntrackedFile()
+	public void targetBranchRebaseDoesNotOverwriteUntrackedFile()
 			throws Exception {
 		git.branchCreate().setName("rebase-fast-forward").setStartPoint("three")
 				.call();
 		git.checkout().setName("two").call();
 		Files.delete(args.toPath());
 		writeTrashFile("three.t", "untracked");
-		assertThrows(CheckoutConflictException.class,
-				() -> git.checkout().setName("rebase-fast-forward").call());
+		assertEquals(RebaseResult.Status.CONFLICTS,
+				git.rebase().setUpstream("HEAD").setBranch("rebase-fast-forward")
+						.call().getStatus());
 		assertFalse(args.exists());
 		assertEquals(two, db.resolve(Constants.HEAD));
 		assertEquals("untracked", Files

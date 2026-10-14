@@ -47,6 +47,9 @@ class Merge extends TextBuiltin {
 	@Option(name = "--no-commit", usage = "usage_noCommit")
 	private boolean noCommit = false;
 
+	@Option(name = "--no-verify", usage = "usage_mergeNoVerify")
+	private boolean noVerify;
+
 	private MergeStrategy mergeStrategy = MergeStrategy.RECURSIVE;
 
 	@Argument(required = true, metaVar = "metaVar_ref", usage = "usage_mergeRef")
@@ -117,7 +120,8 @@ class Merge extends TextBuiltin {
 						.setContentMergeStrategy(contentStrategy)
 						.setSquash(squash)
 						.setFastForward(ff)
-						.setCommit(!noCommit);
+						.setCommit(!noCommit)
+						.setNoVerify(noVerify);
 				if (srcRef != null) {
 					mergeCmd.include(srcRef);
 				} else {

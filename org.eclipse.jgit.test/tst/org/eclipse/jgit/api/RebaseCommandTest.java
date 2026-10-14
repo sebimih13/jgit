@@ -2051,11 +2051,13 @@ public class RebaseCommandTest extends RepositoryTestCase {
 		// rebase
 		RebaseResult result = git.rebase().setUpstream("refs/heads/master")
 				.call();
-		assertEquals(Status.FAST_FORWARD, result.getStatus());
+		// Native Git rejects dirty fast-forward rebases before changing HEAD.
+		assertEquals(Status.UNCOMMITTED_CHANGES, result.getStatus());
+		assertEquals(commit, db.resolve(Constants.HEAD));
 		checkFile(new File(db.getWorkTree(), "file0"), "modified file0");
-		checkFile(new File(db.getWorkTree(), FILE1), "modified file1");
+		checkFile(new File(db.getWorkTree(), FILE1), "file1");
 		assertEquals("[file0, mode:100644, content:modified file0 in index]"
-				+ "[file1, mode:100644, content:modified file1]",
+				+ "[file1, mode:100644, content:file1]",
 				indexState(CONTENT));
 		assertEquals(RepositoryState.SAFE, db.getRepositoryState());
 	}
@@ -2125,10 +2127,12 @@ public class RebaseCommandTest extends RepositoryTestCase {
 		// rebase
 		RebaseResult result = git.rebase().setUpstream("refs/heads/master")
 				.call();
-		assertEquals(Status.FAST_FORWARD, result.getStatus());
+		// Native Git rejects dirty fast-forward rebases before changing HEAD.
+		assertEquals(Status.UNCOMMITTED_CHANGES, result.getStatus());
+		assertEquals(commit, db.resolve(Constants.HEAD));
 		assertFalse("File should still be deleted", file0.exists());
-		// index should only have updated file1
-		assertEquals("[file1, mode:100644, content:modified file1]",
+		// The staged deletion and remaining index content are preserved.
+		assertEquals("[file1, mode:100644, content:file1]",
 				indexState(CONTENT));
 		assertEquals(RepositoryState.SAFE, db.getRepositoryState());
 	}

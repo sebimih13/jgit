@@ -43,6 +43,7 @@ import org.eclipse.jgit.errors.UnmergedPathException;
 import org.eclipse.jgit.hooks.CommitMsgHook;
 import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.hooks.PostCommitHook;
+import org.eclipse.jgit.hooks.PostRewriteHook;
 import org.eclipse.jgit.hooks.PreCommitHook;
 import org.eclipse.jgit.hooks.PrepareCommitMsgHook;
 import org.eclipse.jgit.internal.JGitText;
@@ -103,6 +104,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 
 	private boolean amend;
 
+	private boolean noPostRewrite;
+
 	private boolean insertChangeId;
 
 	/**
@@ -119,6 +122,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 * Setting this option bypasses the pre-commit and commit-msg hooks.
 	 */
 	private boolean noVerify;
+
+	private boolean automaticMerge;
 
 	private HashMap<String, PrintStream> hookOutRedirect = new HashMap<>(3);
 
@@ -200,7 +205,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						JGitText.get().cannotCommitOnARepoWithState,
 						state.name()));
 
-			if (!noVerify) {
+			if (!noVerify && !automaticMerge) {
 				Hooks.preCommit(repo, hookOutRedirect.get(PreCommitHook.NAME),
 						hookErrRedirect.get(PreCommitHook.NAME))
 						.call();
@@ -264,6 +269,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 					checkIfEmpty(rw, headId, indexTreeId);
 				} finally {
 					index.unlock();
+				}
+
+				if (!noVerify && automaticMerge) {
+					Hooks.preMergeCommit(repo, null, null).call();
 				}
 
 				message = Hooks.prepareCommitMsg(repo,
@@ -336,6 +345,18 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						JGitText.get().postCommitHookFailed, e.getMessage()),
 						e);
 			}
+			if (amend && !noPostRewrite && headId != null) {
+				try {
+					Hooks.postRewrite(repo, "amend", //$NON-NLS-1$
+							headId.name() + " " + revCommit.name() + "\n", //$NON-NLS-1$ //$NON-NLS-2$
+							hookOutRedirect.get(PostRewriteHook.NAME),
+							hookErrRedirect.get(PostRewriteHook.NAME)).call();
+				} catch (Exception e) {
+					log.error(MessageFormat.format(
+							JGitText.get().exceptionCaughtDuringExecutionOfHook,
+							PostRewriteHook.NAME), e);
+				}
+			}
 			return revCommit;
 		} catch (UnmergedPathException e) {
 			throw new UnmergedPathsException(e);
@@ -398,6 +419,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		switch (rc) {
 		case NEW:
 		case FORCED:
+		case NO_CHANGE:
 		case FAST_FORWARD: {
 			setCallable(false);
 			if (state == RepositoryState.MERGING_RESOLVED
@@ -932,6 +954,19 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	}
 
 	/**
+	 * Suppress the post-rewrite notification for an amendment.
+	 *
+	 * @param noPostRewrite whether to suppress notification
+	 * @return this command
+	 * @since 7.8
+	 */
+	public CommitCommand setNoPostRewrite(boolean noPostRewrite) {
+		checkCallable();
+		this.noPostRewrite = noPostRewrite;
+		return this;
+	}
+
+	/**
 	 * Commit dedicated path only.
 	 * <p>
 	 * This method can be called several times to add multiple paths. Full file
@@ -1005,9 +1040,15 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		return this;
 	}
 
+	// Automatic merges verify after the merge tree snapshot is taken.
+	CommitCommand setAutomaticMerge(boolean automaticMerge) {
+		this.automaticMerge = automaticMerge;
+		return this;
+	}
+
 	/**
 	 * Set the output stream for all hook scripts executed by this command
-	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit). If not set it
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
 	 * defaults to
 	 * {@code System.out}.
 	 *
@@ -1021,12 +1062,13 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		setHookOutputStream(PrepareCommitMsgHook.NAME, hookStdOut);
 		setHookOutputStream(CommitMsgHook.NAME, hookStdOut);
 		setHookOutputStream(PostCommitHook.NAME, hookStdOut);
+		setHookOutputStream(PostRewriteHook.NAME, hookStdOut);
 		return this;
 	}
 
 	/**
 	 * Set the error stream for all hook scripts executed by this command
-	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit). If not set it
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
 	 * defaults to
 	 * {@code System.err}.
 	 *
@@ -1040,12 +1082,13 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		setHookErrorStream(PrepareCommitMsgHook.NAME, hookStdErr);
 		setHookErrorStream(CommitMsgHook.NAME, hookStdErr);
 		setHookErrorStream(PostCommitHook.NAME, hookStdErr);
+		setHookErrorStream(PostRewriteHook.NAME, hookStdErr);
 		return this;
 	}
 
 	/**
 	 * Set the output stream for a selected hook script executed by this command
-	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit). If not set it
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
 	 * defaults to
 	 * {@code System.out}.
 	 *
@@ -1061,7 +1104,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		if (!(PreCommitHook.NAME.equals(hookName)
 				|| PrepareCommitMsgHook.NAME.equals(hookName)
 				|| CommitMsgHook.NAME.equals(hookName)
-				|| PostCommitHook.NAME.equals(hookName))) {
+				|| PostCommitHook.NAME.equals(hookName)
+				|| PostRewriteHook.NAME.equals(hookName))) {
 			throw new IllegalArgumentException(
 					MessageFormat.format(JGitText.get().illegalHookName,
 							hookName));
@@ -1072,7 +1116,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 
 	/**
 	 * Set the error stream for a selected hook script executed by this command
-	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit). If not set it
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
 	 * defaults to
 	 * {@code System.err}.
 	 *
@@ -1088,7 +1132,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		if (!(PreCommitHook.NAME.equals(hookName)
 				|| PrepareCommitMsgHook.NAME.equals(hookName)
 				|| CommitMsgHook.NAME.equals(hookName)
-				|| PostCommitHook.NAME.equals(hookName))) {
+				|| PostCommitHook.NAME.equals(hookName)
+				|| PostRewriteHook.NAME.equals(hookName))) {
 			throw new IllegalArgumentException(MessageFormat
 					.format(JGitText.get().illegalHookName, hookName));
 		}

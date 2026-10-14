@@ -74,6 +74,9 @@ class Commit extends TextBuiltin {
 	@Option(name = "--amend", usage = "usage_CommitAmend")
 	private boolean amend;
 
+	@Option(name = "--no-post-rewrite", usage = "usage_noPostRewrite")
+	private boolean noPostRewrite;
+
 	@Option(name = "--gpg-sign", aliases = { "-S" }, forbids = {
 			"--no-gpg-sign" }, handler = GpgSignHandler.class)
 	private String gpgSigningKey;
@@ -114,6 +117,7 @@ class Commit extends TextBuiltin {
 				}
 			}
 			commitCmd.setAmend(amend);
+			commitCmd.setNoPostRewrite(noPostRewrite);
 			commitCmd.setAll(all);
 			Ref head = db.exactRef(Constants.HEAD);
 			if (head == null) {
