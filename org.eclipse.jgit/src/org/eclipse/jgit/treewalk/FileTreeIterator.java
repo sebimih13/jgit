@@ -236,17 +236,22 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	private Entry[] entries() {
 		Map<String, FS.Attributes> attributes = preloaded == null ? null
 				: preloaded.takeDirectory(directory);
-		if (attributes == null) {
+		// Keep custom enumeration and Win32's attribute-aware listing intact.
+		if (attributes == null && fs.getClass() != FS_POSIX.class) {
 			return fs.list(directory, fileModeStrategy);
 		}
 		File[] files = directory.listFiles();
 		if (files == null) {
 			return new Entry[0];
 		}
+		FS.Attributes[] parallel = fs.getClass() == FS_POSIX.class
+				? DirectoryMetadata.read(fs, files, attributes) : null;
 		Entry[] result = new Entry[files.length];
 		for (int i = 0; i < files.length; i++) {
-			File file = fs.normalize(files[i]);
-			FS.Attributes cached = attributes.get(file.getName());
+			File file = files[i];
+			FS.Attributes cached = parallel != null ? parallel[i]
+					: attributes == null ? null
+							: attributes.get(fs.normalize(file).getName());
 			result[i] = cached == null
 					? new FileEntry(file, fs, fileModeStrategy)
 					: new FileEntry(file, fs, cached, fileModeStrategy);
