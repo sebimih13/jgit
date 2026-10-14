@@ -1350,6 +1350,8 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 
 		monitor.endTask();
 
+		// Interactive rebases may receive an unparsed parent from another walk.
+		walk.parseBody(upstreamCommit);
 		// we rewind to the upstream commit
 		monitor.beginTask(MessageFormat.format(JGitText.get().rewinding,
 				upstreamCommit.getShortMessage()), ProgressMonitor.UNKNOWN);
