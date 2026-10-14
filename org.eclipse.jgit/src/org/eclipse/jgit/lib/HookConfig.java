@@ -10,8 +10,7 @@
 package org.eclipse.jgit.lib;
 
 import java.math.BigInteger;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -20,8 +19,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.jgit.api.errors.JGitInternalException;
+import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +52,7 @@ public final class HookConfig {
 
 	/**
 	 * A configured hook command.
-	 * 
+	 *
 	 * @param name
 	 *            friendly name
 	 * @param command
@@ -89,11 +91,11 @@ public final class HookConfig {
 				String command = builder.commands.get(name);
 				if (command == null) {
 					if (enabled) {
-						throw new JGitInternalException("hook." + name //$NON-NLS-1$
-								+ ".command must be configured or its event removed"); //$NON-NLS-1$
+						throw new JGitInternalException(MessageFormat.format(
+								JGitText.get().hookCommandMissing, name));
 					}
-					LOG.warn("Disabled hook '{}' has no command configured", //$NON-NLS-1$
-							name);
+					LOG.warn(MessageFormat.format(
+							JGitText.get().hookDisabledCommandMissing, name));
 				}
 				if (!friendly.contains(event) && !builder.enabled
 						.getOrDefault(event, Boolean.TRUE).booleanValue()) {
@@ -171,8 +173,9 @@ public final class HookConfig {
 					continue;
 				}
 				if (value == null) {
-					throw new JGitInternalException("Missing value for hook." //$NON-NLS-1$
-							+ line.subsection + '.' + line.name);
+					throw new JGitInternalException(MessageFormat.format(
+							JGitText.get().hookConfigValueMissing,
+							line.subsection, line.name));
 				}
 				String name = line.subsection;
 				switch (line.name.toLowerCase(Locale.ROOT)) {
@@ -182,12 +185,13 @@ public final class HookConfig {
 					} else {
 						if (KNOWN.contains(name)) {
 							throw new JGitInternalException(
-									"Hook friendly-name collides with event: " //$NON-NLS-1$
-											+ name);
+									MessageFormat.format(
+									JGitText.get().hookFriendlyNameCollision, name));
 						}
 						if (name.equals(value)) {
-							LOG.warn("Hook friendly-name '{}' equals its event", //$NON-NLS-1$
-									name);
+							LOG.warn(MessageFormat.format(
+									JGitText.get().hookFriendlyNameMatchesEvent,
+									name));
 						}
 						LinkedHashSet<String> names = events.computeIfAbsent(
 								value, key -> new LinkedHashSet<>());
@@ -207,9 +211,8 @@ public final class HookConfig {
 				case "parallel": //$NON-NLS-1$
 					Boolean concurrent = parseBoolean(value);
 					if (concurrent == null) {
-						LOG.warn(
-								"Ignoring invalid hook parallel setting for '{}'", //$NON-NLS-1$
-								name);
+						LOG.warn(MessageFormat.format(
+								JGitText.get().hookParallelSettingInvalid, name));
 					} else {
 						parallel.put(name, concurrent);
 					}
@@ -233,7 +236,7 @@ public final class HookConfig {
 			return Integer.valueOf(Runtime.getRuntime().availableProcessors());
 		}
 		if (count == null || count.intValue() <= 0) {
-			LOG.warn("Ignoring invalid hook job count"); //$NON-NLS-1$
+			LOG.warn(JGitText.get().hookJobCountInvalid);
 			return null;
 		}
 		return count;

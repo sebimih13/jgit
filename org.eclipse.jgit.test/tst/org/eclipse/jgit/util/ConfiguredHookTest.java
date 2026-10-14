@@ -370,13 +370,15 @@ public class ConfiguredHookTest extends RepositoryTestCase {
 		db.getConfig().setBoolean("hook", "one", "enabled", false);
 		commit();
 		db.getConfig().setBoolean("hook", "one", "enabled", true);
-		assertThrows(JGitInternalException.class, this::commit);
+		assertEquals("hook.one.command must be configured or its event removed",
+				assertThrows(JGitInternalException.class, this::commit).getMessage());
 	}
 
 	@Test
 	public void knownEventNameCannotBeFriendlyName() throws Exception {
 		named("pre-commit", "post-commit", "exit 0");
-		assertThrows(JGitInternalException.class, this::commit);
+		assertEquals("Hook friendly-name collides with event: pre-commit",
+				assertThrows(JGitInternalException.class, this::commit).getMessage());
 	}
 
 	@Test

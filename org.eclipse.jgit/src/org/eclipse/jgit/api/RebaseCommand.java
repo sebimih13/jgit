@@ -515,7 +515,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 			try (Git git = new Git(repo)) {
 				newHead = git.commit()
 						.setMessage(newMessage)
-						.setAmend(true).setNoPostRewrite(true)
+						.setAmend(true)
 						.setNoVerify(false)
 						.setInsertChangeId(doChangeId[0])
 						.call();
@@ -921,7 +921,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 				}
 				retNewHead = git.commit()
 						.setMessage(commitMessage)
-						.setAmend(true).setNoPostRewrite(true)
+						.setAmend(true)
 						.setNoVerify(true)
 						.setInsertChangeId(doChangeId[0])
 						.call();
@@ -930,7 +930,7 @@ public class RebaseCommand extends GitCommand<RebaseResult> {
 			} else {
 				// Next step is either Squash or Fixup
 				retNewHead = git.commit().setMessage(commitMessage)
-						.setAmend(true).setNoPostRewrite(true).setNoVerify(true).call();
+						.setAmend(true).setNoVerify(true).call();
 			}
 		}
 		return retNewHead;

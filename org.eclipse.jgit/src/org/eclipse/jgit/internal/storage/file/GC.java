@@ -106,6 +106,7 @@ import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FS.LockToken;
 import org.eclipse.jgit.util.FileUtils;
 import org.eclipse.jgit.util.GitTimeParser;
+import org.eclipse.jgit.util.ProcessResult;
 import org.eclipse.jgit.util.StringUtils;
 import org.eclipse.jgit.util.SystemReader;
 import org.slf4j.Logger;
@@ -246,6 +247,17 @@ public class GC {
 	 */
 	public CompletableFuture<Collection<Pack>> gc()
 			throws IOException, ParseException, GitAPIException {
+		if (automatic) {
+			if (!needGc()) {
+				return CompletableFuture.completedFuture(Collections.emptyList());
+			}
+			ProcessResult hook = repo.getFS()
+					.runHookIfPresent(repo, "pre-auto-gc", new String[0], //$NON-NLS-1$
+							System.err, System.err, null);
+			if (hook.isExecutedWithError()) {
+				return CompletableFuture.completedFuture(Collections.emptyList());
+			}
+		}
 		if (!background) {
 			return CompletableFuture.completedFuture(doGc());
 		}
@@ -301,9 +313,7 @@ public class GC {
 
 	private Collection<Pack> doGc()
 			throws IOException, ParseException, GitAPIException {
-		if (automatic && !needGc()) {
-			return Collections.emptyList();
-		}
+
 		try (PidLock lock = new PidLock()) {
 			if (!lock.lock()) {
 				return Collections.emptyList();
@@ -1828,7 +1838,6 @@ public class GC {
 		} else {
 			return tooManyLooseObjects();
 		}
-		// TODO run pre-auto-gc hook, if it fails return false
 		return true;
 	}
 

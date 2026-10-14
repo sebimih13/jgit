@@ -401,6 +401,13 @@ public class JGitText extends TranslationBundle {
 	/***/ public String gcFailed;
 	/***/ public String gcTooManyUnpruned;
 	/***/ public String headRequiredToStash;
+	/***/ public String hookCommandMissing;
+	/***/ public String hookConfigValueMissing;
+	/***/ public String hookDisabledCommandMissing;
+	/***/ public String hookFriendlyNameCollision;
+	/***/ public String hookFriendlyNameMatchesEvent;
+	/***/ public String hookJobCountInvalid;
+	/***/ public String hookParallelSettingInvalid;
 	/***/ public String hoursAgo;
 	/***/ public String httpConfigCannotNormalizeURL;
 	/***/ public String httpConfigInvalidURL;
