@@ -11,6 +11,8 @@ package org.eclipse.jgit.api;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.file.Files;
@@ -173,18 +175,28 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 	// Native rescans untracked paths when UNTR is disabled; this difference is
 	// recorded.
 	@Test
-	public void unreportedChangesExposeWholeSnapshotSemantics()
+	public void unreportedPathsRescanUntrackedWhenCacheDisabled()
 			throws Exception {
 		fsmonitorFixture();
 		Status clean = git.status().call();
 		reply();
-		assertSame(clean, git.status().call());
+		if (untrackedCache) {
+			assertSame(clean, git.status().call());
+		} else {
+			assertTrue(git.status().call().getUntracked().isEmpty());
+		}
 		dirty();
 		reply();
 		Status hidden = git.status().call();
-		assertSame(clean, hidden);
-		assertTrue(hidden.isClean());
+		if (untrackedCache) {
+			assertSame(clean, hidden);
+		} else {
+			assertNotSame(clean, hidden);
+		}
+		assertTrue(hidden.getModified().isEmpty());
 		Status full = fresh();
+		assertEquals(untrackedCache ? Set.of() : full.getUntracked(),
+				hidden.getUntracked());
 		assertEquals(Set.of("modified", "dir1/modified", "dir2/modified"),
 				full.getModified());
 		assertEquals(Set.of("untracked", "dir1/untracked", "dir2/untracked",
@@ -286,6 +298,50 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		assertEquals(Set.of("one", "two", "done/one"), check().getAdded());
 	}
 
+	@Test
+	public void unreportedDeletionAndIgnoredCreationRescanWhenCacheDisabled()
+			throws Exception {
+		fsmonitorFixture();
+		put(".gitignore", "*.tmp\n");
+		git.add().addFilepattern(".gitignore").call();
+		git.commit().setMessage("ignore").call();
+		put("old", "untracked");
+		put("old.tmp", "ignored");
+		Status before = git.status().call();
+		Files.delete(db.getWorkTree().toPath().resolve("old"));
+		Files.delete(db.getWorkTree().toPath().resolve("old.tmp"));
+		put("new-file", "untracked");
+		put("new.tmp", "ignored");
+		reply();
+		Status after = git.status().call();
+		if (untrackedCache) {
+			assertSame(before, after);
+		} else {
+			assertEquals(Set.of("new-file"), after.getUntracked());
+			assertEquals(Set.of("new.tmp"), after.getIgnoredNotInIndex());
+			equal(fresh(), after);
+			nativeOracle(after.getAdded(), after.getChanged(),
+					after.getRemoved(), after.getModified(), after.getMissing(),
+					after.getUntracked());
+		}
+	}
+
+	@Test
+	public void nestedRepositoryKeepsApiPathAndMatchesTypedNativeDirectory()
+			throws Exception {
+		fsmonitorFixture();
+		put("nested/file", "untracked");
+		git.status().call();
+		try (Git nested = Git.init()
+				.setDirectory(
+						db.getWorkTree().toPath().resolve("nested").toFile())
+				.call()) {
+			assertNotNull(nested.getRepository());
+		}
+		reply("nested/.git");
+		assertEquals(Set.of("nested"), check().getUntracked());
+	}
+
 	private void nativeOracle(java.util.Set<String> added,
 			java.util.Set<String> changed, java.util.Set<String> removed,
 			java.util.Set<String> modified, java.util.Set<String> missing,
@@ -328,8 +384,12 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 					: missing.contains(path) ? 'D' : ' ';
 			expected.add("" + index + worktree + " " + path);
 		}
-		for (String path : untracked)
-			expected.add("?? " + path);
+		for (String path : untracked) {
+			boolean directory = Files.isDirectory(
+					db.getWorkTree().toPath().resolve(path),
+					java.nio.file.LinkOption.NOFOLLOW_LINKS);
+			expected.add("?? " + path + (directory ? "/" : ""));
+		}
 		String raw = Files.readString(output);
 		assertTrue("Native porcelain must be NUL terminated",
 				raw.isEmpty() || raw.charAt(raw.length() - 1) == 0);

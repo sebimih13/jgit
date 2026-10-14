@@ -155,6 +155,17 @@ public class StatusCommand extends GitCommand<Status> {
 				FsMonitor.Probe probe = cache.monitor.query(repo);
 				Status previous = cache.result.get();
 				if (probe != null && probe.isUnchanged() && previous != null) {
+					if (!FsMonitor.isUntrackedCacheEnabled(repo)) {
+						try {
+							Status untracked = scanStatus(probe, false, true);
+							previous = new Status(previous, untracked);
+							cache.result = new WeakReference<>(previous);
+						} catch (GitAPIException | RuntimeException | Error failure) {
+							cache.result.clear();
+							cache.monitor.clear();
+							throw failure;
+						}
+					}
 					cache.monitor.remember(probe);
 					return previous;
 				}
@@ -181,11 +192,30 @@ public class StatusCommand extends GitCommand<Status> {
 	}
 
 	private Status scanStatus(FsMonitor.Probe probe, boolean forceContentCheck) throws GitAPIException, NoWorkTreeException {
+		return scanStatus(probe, forceContentCheck, false);
+	}
+
+	private Status scanStatus(FsMonitor.Probe probe, boolean forceContentCheck,
+			boolean untrackedOnly) throws GitAPIException, NoWorkTreeException {
 		if (workingTreeIt == null)
 			workingTreeIt = new FileTreeIterator(repo);
 
 		try {
 			IndexDiff diff = new IndexDiff(repo, Constants.HEAD, workingTreeIt);
+			if (untrackedOnly) {
+				diff.setFilter(new org.eclipse.jgit.treewalk.filter.TreeFilter() {
+					@Override
+					public boolean include(org.eclipse.jgit.treewalk.TreeWalk walk) {
+						return walk.getTreeCount() < 2 || walk.isSubtree()
+								|| walk.getRawMode(1) == 0;
+					}
+					@Override
+					public boolean shouldBeRecursive() { return true; }
+					@Override
+					public org.eclipse.jgit.treewalk.filter.TreeFilter clone() { return this; }
+				});
+			}
+
 			if (forceContentCheck) {
 				diff.setForceContentCheckPaths(java.util.List.of("/")); //$NON-NLS-1$
 			} else if (probe != null) {

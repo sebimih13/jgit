@@ -42,6 +42,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 		db.getConfig().setString("core", null, "fsmonitor",
 				hook.getAbsolutePath());
 		db.getConfig().setBoolean("jgit", null, "fsmonitorCache", true);
+		db.getConfig().setBoolean("core", null, "untrackedCache", true);
 		reply("initial\0/\0");
 	}
 
@@ -714,6 +715,8 @@ public class FsMonitorTest extends RepositoryTestCase {
 				assertNotSame(db, reopened.getRepository());
 				reopened.getRepository().getConfig().setBoolean("jgit", null,
 						"fsmonitorCache", true);
+				reopened.getRepository().getConfig().setBoolean("core", null,
+						"untrackedCache", true);
 				reopened.getRepository().getConfig().setString("core", null,
 						"fsmonitor",
 						db.getConfig().getString("core", null, "fsmonitor"));
@@ -727,6 +730,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 			try (Git secondRepo = new Git(other)) {
 				other.getConfig().setBoolean("jgit", null, "fsmonitorCache",
 						true);
+				other.getConfig().setBoolean("core", null, "untrackedCache", true);
 				other.getConfig().setString("core", null, "fsmonitor",
 						db.getConfig().getString("core", null, "fsmonitor"));
 				File onlyOther = new File(other.getWorkTree(), "only-other");
@@ -1250,4 +1254,38 @@ public class FsMonitorTest extends RepositoryTestCase {
 		assertEquals(2, FsMonitor
 				.parse("token\0path".getBytes(StandardCharsets.UTF_8)).length);
 	}
+	@Test
+	public void effectiveUntrackedSettingsControlUnreportedPathRescans() throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			for (String setting : new String[] { "false", "keep", "unset" }) {
+				if ("unset".equals(setting)) {
+					db.getConfig().unset("core", null, "untrackedCache");
+				} else {
+					db.getConfig().setString("core", null, "untrackedCache", setting);
+				}
+				reply("before-" + setting + "\0/\0");
+				git.status().call();
+				writeTrashFile("new-" + setting, "untracked");
+				reply("after-" + setting + "\0");
+				assertTrue(git.status().call().getUntracked().contains("new-" + setting));
+			}
+			db.getConfig().setBoolean("feature", null, "manyFiles", true);
+			reply("many-before\0/\0");
+			Status before = git.status().call();
+			writeTrashFile("many-new", "unreported");
+			reply("many-after\0");
+			assertSame(before, git.status().call());
+			db.getConfig().setBoolean("core", null, "untrackedCache", false);
+			reply("override-before\0/\0");
+			git.status().call();
+			writeTrashFile("override-new", "unreported");
+			reply("override-after\0");
+			assertTrue(git.status().call().getUntracked().contains("override-new"));
+		}
+	}
+
 }

@@ -63,6 +63,31 @@ public final class FsMonitor {
 						"fsmonitorCache", false); //$NON-NLS-1$
 	}
 
+	/**
+	 * Whether untracked status may be reused under the effective cache setting.
+	 *
+	 * @param repository
+	 *            repository whose index and configuration apply
+	 * @return true for an enabled cache or a retained native UNTR extension
+	 * @since 7.8
+	 */
+	public static boolean isUntrackedCacheEnabled(Repository repository) {
+		Config config = repository.getConfig();
+		String value = config.getString("core", null, "untrackedCache"); //$NON-NLS-1$ //$NON-NLS-2$
+		if (value == null && config.getBoolean("feature", null, //$NON-NLS-1$
+				"manyFiles", false)) { //$NON-NLS-1$
+			return true;
+		}
+		if (value != null && !"keep".equalsIgnoreCase(value)) { //$NON-NLS-1$
+			return config.getBoolean("core", null, "untrackedCache", false); //$NON-NLS-1$ //$NON-NLS-2$
+		}
+		try {
+			return repository.readDirCache().getUntrackedCache() != null;
+		} catch (IOException unreadableIndex) {
+			return false;
+		}
+	}
+
 	/** Query result; valid means its token may seed a successful full scan. */
 	public static final class Probe {
 		private final String fingerprint;

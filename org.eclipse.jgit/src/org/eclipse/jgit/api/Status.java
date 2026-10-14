@@ -32,6 +32,8 @@ import org.eclipse.jgit.lib.IndexDiff.StageState;
 public class Status {
 	private final IndexDiff diff;
 
+	private final IndexDiff untrackedDiff;
+
 	private final boolean clean;
 
 	private final boolean hasUncommittedChanges;
@@ -43,8 +45,16 @@ public class Status {
 	 *            the {@link org.eclipse.jgit.lib.IndexDiff} having the status
 	 */
 	public Status(IndexDiff diff) {
-		super();
+		this(diff, diff);
+	}
+
+	Status(Status tracked, Status untracked) {
+		this(tracked.diff, untracked.untrackedDiff);
+	}
+
+	private Status(IndexDiff diff, IndexDiff untrackedDiff) {
 		this.diff = diff;
+		this.untrackedDiff = untrackedDiff;
 		hasUncommittedChanges = !diff.getAdded().isEmpty() //
 				|| !diff.getChanged().isEmpty() //
 				|| !diff.getRemoved().isEmpty() //
@@ -52,7 +62,7 @@ public class Status {
 				|| !diff.getModified().isEmpty() //
 				|| !diff.getConflicting().isEmpty();
 		clean = !hasUncommittedChanges //
-				&& diff.getUntracked().isEmpty();
+				&& untrackedDiff.getUntracked().isEmpty();
 	}
 
 	/**
@@ -135,7 +145,7 @@ public class Status {
 	 *         index)
 	 */
 	public Set<String> getUntracked() {
-		return Collections.unmodifiableSet(diff.getUntracked());
+		return Collections.unmodifiableSet(untrackedDiff.getUntracked());
 	}
 
 	/**
@@ -144,7 +154,7 @@ public class Status {
 	 * @return set of directories that are not ignored, and not in the index.
 	 */
 	public Set<String> getUntrackedFolders() {
-		return Collections.unmodifiableSet(diff.getUntrackedFolders());
+		return Collections.unmodifiableSet(untrackedDiff.getUntrackedFolders());
 	}
 
 	/**
@@ -174,7 +184,7 @@ public class Status {
 	 * @return set of files and folders that are ignored and not in the index.
 	 */
 	public Set<String> getIgnoredNotInIndex() {
-		return Collections.unmodifiableSet(diff.getIgnoredNotInIndex());
+		return Collections.unmodifiableSet(untrackedDiff.getIgnoredNotInIndex());
 	}
 
 	/**
