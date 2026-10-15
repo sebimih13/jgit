@@ -72,6 +72,22 @@ public final class FsMonitor {
 	 * @since 7.8
 	 */
 	public static boolean isUntrackedCacheEnabled(Repository repository) {
+		return isUntrackedCacheEnabled(repository, null);
+	}
+
+	/**
+	 * Resolve the untracked-cache setting using an index already validated by
+	 * the supplied query, avoiding another index read for the keep setting.
+	 *
+	 * @param repository
+	 *            repository used by the query
+	 * @param probe
+	 *            successful query for this repository, or null to read the index
+	 * @return whether untracked status may be reused
+	 * @since 7.8
+	 */
+	public static boolean isUntrackedCacheEnabled(Repository repository,
+			Probe probe) {
 		Config config = repository.getConfig();
 		String value = config.getString("core", null, "untrackedCache"); //$NON-NLS-1$ //$NON-NLS-2$
 		if (value == null && config.getBoolean("feature", null, //$NON-NLS-1$
@@ -80,6 +96,9 @@ public final class FsMonitor {
 		}
 		if (value != null && !"keep".equalsIgnoreCase(value)) { //$NON-NLS-1$
 			return config.getBoolean("core", null, "untrackedCache", false); //$NON-NLS-1$ //$NON-NLS-2$
+		}
+		if (probe != null) {
+			return probe.hasUntrackedCache;
 		}
 		try {
 			return repository.readDirCache().getUntrackedCache() != null;
@@ -98,12 +117,15 @@ public final class FsMonitor {
 
 		private final List<String> changedPaths;
 
+		private final boolean hasUntrackedCache;
+
 		private Probe(String fingerprint, String token, boolean unchanged,
-				List<String> changedPaths) {
+				List<String> changedPaths, boolean hasUntrackedCache) {
 			this.fingerprint = fingerprint;
 			this.token = token;
 			this.unchanged = unchanged;
 			this.changedPaths = List.copyOf(changedPaths);
+			this.hasUntrackedCache = hasUntrackedCache;
 		}
 
 		/** @return whether no filesystem/context changes were observed */
@@ -131,6 +153,8 @@ public final class FsMonitor {
 
 		private boolean supportedIndex;
 
+		private boolean hasUntrackedCache;
+
 		private FileSnapshot unsupportedIndex;
 
 		private boolean fullContentCheckRequired;
@@ -142,6 +166,7 @@ public final class FsMonitor {
 		public synchronized void clear() {
 			fingerprint = token = checkedIndex = null;
 			supportedIndex = false;
+			hasUntrackedCache = false;
 			unsupportedIndex = null;
 			fullContentCheckRequired = false;
 		}
@@ -197,6 +222,7 @@ public final class FsMonitor {
 					String index = digest(repository.getIndexFile().toPath());
 					if (!index.equals(checkedIndex)) {
 						DirCache cache = repository.readDirCache();
+						hasUntrackedCache = cache.getUntrackedCache() != null;
 						supportedIndex = true;
 						for (int i = 0; i < cache.getEntryCount(); i++) {
 							if (cache.getEntry(i)
@@ -269,7 +295,7 @@ public final class FsMonitor {
 					trace.data("cache/hit", //$NON-NLS-1$
 							Boolean.toString(noChanges && sameContext));
 					return new Probe(key, records[0], noChanges && sameContext,
-							changedPaths);
+							changedPaths, hasUntrackedCache);
 				} catch (Exception failure) {
 					if (failure instanceof InterruptedException) {
 						Thread.currentThread().interrupt();
@@ -531,7 +557,10 @@ public final class FsMonitor {
 			String path = fields[i];
 			if (path.isEmpty() || path.startsWith("/") && !path.equals("/") //$NON-NLS-1$ //$NON-NLS-2$
 					|| path.contains("\\") //$NON-NLS-1$
-					|| path.matches("(^|.*/)\\.\\.(/.*|$)")) {
+					|| path.equals("..") //$NON-NLS-1$
+					|| path.startsWith("../") //$NON-NLS-1$
+					|| path.endsWith("/..") //$NON-NLS-1$
+					|| path.contains("/../")) { //$NON-NLS-1$
 				return null;
 			}
 		}

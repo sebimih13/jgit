@@ -155,7 +155,7 @@ public class StatusCommand extends GitCommand<Status> {
 				FsMonitor.Probe probe = cache.monitor.query(repo);
 				Status previous = cache.result.get();
 				if (probe != null && probe.isUnchanged() && previous != null) {
-					if (!FsMonitor.isUntrackedCacheEnabled(repo)) {
+					if (!FsMonitor.isUntrackedCacheEnabled(repo, probe)) {
 						try {
 							Status untracked = scanStatus(probe, false, true);
 							previous = new Status(previous, untracked);

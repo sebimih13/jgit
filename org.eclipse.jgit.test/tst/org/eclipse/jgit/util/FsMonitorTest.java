@@ -24,6 +24,7 @@ import java.util.Set;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.junit.RepositoryTestCase;
+import org.eclipse.jgit.lib.Repository;
 import org.junit.Test;
 
 public class FsMonitorTest extends RepositoryTestCase {
@@ -1244,6 +1245,18 @@ public class FsMonitorTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void parentComponentsAreRejectedAcrossLineTerminators()
+			throws Exception {
+		for (String separator : new String[] { "\n", "\r", "\u0085", "\u2028", "\u2029" }) {
+			assertNull(FsMonitor.parse(("token\0directory" + separator
+					+ "/../outside\0").getBytes(StandardCharsets.UTF_8)));
+			String valid = "directory" + separator + "/reference..name";
+			assertEquals(valid, FsMonitor.parse(("token\0" + valid + "\0")
+					.getBytes(StandardCharsets.UTF_8))[1]);
+		}
+	}
+
+	@Test
 	public void parserRequiresTokenAndCompleteNulRecords() throws Exception {
 		assertNull(FsMonitor.parse(new byte[0]));
 		assertNull(FsMonitor.parse("token".getBytes(StandardCharsets.UTF_8)));
@@ -1254,6 +1267,81 @@ public class FsMonitorTest extends RepositoryTestCase {
 		assertEquals(2, FsMonitor
 				.parse("token\0path".getBytes(StandardCharsets.UTF_8)).length);
 	}
+	@Test
+	public void keepCacheHitDoesNotReparseValidatedIndex() throws Exception {
+		configure(null);
+		db.getConfig().setString("core", null, "untrackedCache", "keep");
+		try (Git git = new Git(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			setNativeUntrackedCache(true);
+		}
+		db.getConfig().save();
+		java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+		try (Repository repository = new org.eclipse.jgit.internal.storage.file.FileRepository(
+				db.getDirectory()) {
+			@Override
+			public org.eclipse.jgit.dircache.DirCache readDirCache()
+					throws java.io.IOException {
+				reads.incrementAndGet();
+				return super.readDirCache();
+			}
+		}; Git git = new Git(repository)) {
+			Status first = git.status().call();
+			reply("stable\0");
+			int before = reads.get();
+			for (int i = 0; i < 4; i++) {
+				assertSame(first, git.status().call());
+			}
+			assertEquals("A validated cache hit must not parse the index again",
+					before, reads.get());
+		}
+	}
+
+	private void setNativeUntrackedCache(boolean present) throws Exception {
+		org.eclipse.jgit.dircache.DirCache index = db.lockDirCache();
+		try {
+			index.setUntrackedCache(present
+					? new org.eclipse.jgit.internal.storage.file.UntrackedCache()
+					: null);
+			index.write();
+			assertTrue(index.commit());
+		} finally {
+			index.unlock();
+		}
+	}
+
+	@Test
+	public void keepSettingRevalidatesExtensionAdditionAndRemoval()
+			throws Exception {
+		configure(null);
+		db.getConfig().setString("core", null, "untrackedCache", "keep");
+		db.getConfig().setBoolean("index", null, "skipHash", true);
+		try (Git git = new Git(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			int sequence = 0;
+			for (boolean present : new boolean[] { true, false, true, false }) {
+				setNativeUntrackedCache(present);
+				reply("seed-" + sequence + "\0");
+				Status first = git.status().call();
+				String name = "new-" + sequence++;
+				writeTrashFile(name, "untracked");
+				reply("next-" + sequence + "\0");
+				Status next = git.status().call();
+				if (present) {
+					assertSame(first, next);
+				} else {
+					assertTrue(next.getUntracked().contains(name));
+				}
+				reply("rescan-" + sequence + "\0/\0");
+				equal(baseline(git), git.status().call());
+			}
+		}
+	}
+
 	@Test
 	public void effectiveUntrackedSettingsControlUnreportedPathRescans() throws Exception {
 		configure(null);
