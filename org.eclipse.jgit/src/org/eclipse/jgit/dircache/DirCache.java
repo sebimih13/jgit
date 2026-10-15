@@ -333,7 +333,7 @@ public class DirCache {
 	/** If we read this index from disk, the original format. */
 	private DirCacheVersion version;
 
-	/** Whether to skip computing and checking the index checksum */
+	/** Whether to skip computing the checksum when writing the index. */
 	private boolean skipHash;
 
 	/**
@@ -481,8 +481,8 @@ public class DirCache {
 	private void readFrom(InputStream inStream) throws IOException,
 			CorruptObjectException {
 		final BufferedInputStream in = new BufferedInputStream(inStream);
-		readConfig();
-		MessageDigest md = newMessageDigest();
+		// A write setting must not disable validation of a nonzero footer.
+		MessageDigest md = Constants.newMessageDigest();
 
 		// Read the index header and verify we understand it.
 		//
@@ -596,8 +596,7 @@ public class DirCache {
 		}
 
 		readIndexChecksum = md.digest();
-		if (!(skipHash
-				|| Arrays.equals(readIndexChecksum, hdr)
+		if (!(Arrays.equals(readIndexChecksum, hdr)
 				|| Arrays.equals(NullMessageDigest.getInstance().digest(),
 						hdr))) {
 			throw new CorruptObjectException(
@@ -766,10 +765,12 @@ public class DirCache {
 	}
 
 	private void readConfig() {
-		if (version == null && this.repository != null) {
+		if (repository != null) {
 			DirCacheConfig config = repository.getConfig()
 					.get(DirCacheConfig::new);
-			version = config.getIndexVersion();
+			if (version == null) {
+				version = config.getIndexVersion();
+			}
 			skipHash = config.isSkipHash();
 		}
 	}
@@ -1159,24 +1160,27 @@ public class DirCache {
 
 	private static class DirCacheConfig {
 
-		private final DirCacheVersion indexVersion;
+		private final Config config;
+
+		private final boolean manyFiles;
 
 		private final boolean skipHash;
 
 		public DirCacheConfig(Config cfg) {
-			boolean manyFiles = cfg.getBoolean(
+			config = cfg;
+			manyFiles = cfg.getBoolean(
 					ConfigConstants.CONFIG_FEATURE_SECTION,
 					ConfigConstants.CONFIG_KEY_MANYFILES, false);
-			indexVersion = cfg.getEnum(ConfigConstants.CONFIG_INDEX_SECTION,
-					null, ConfigConstants.CONFIG_KEY_VERSION,
-					manyFiles ? DirCacheVersion.DIRC_VERSION_PATHCOMPRESS
-							: DirCacheVersion.DIRC_VERSION_EXTENDED);
 			skipHash = cfg.getBoolean(ConfigConstants.CONFIG_INDEX_SECTION,
-					ConfigConstants.CONFIG_KEY_SKIPHASH, false);
+					ConfigConstants.CONFIG_KEY_SKIPHASH, manyFiles);
 		}
 
 		public DirCacheVersion getIndexVersion() {
-			return indexVersion;
+			// An existing index must not parse a default version it won't use.
+			return config.getEnum(ConfigConstants.CONFIG_INDEX_SECTION, null,
+					ConfigConstants.CONFIG_KEY_VERSION,
+					manyFiles ? DirCacheVersion.DIRC_VERSION_PATHCOMPRESS
+							: DirCacheVersion.DIRC_VERSION_EXTENDED);
 		}
 
 		public boolean isSkipHash() {
