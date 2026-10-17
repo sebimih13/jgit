@@ -27,6 +27,62 @@ import org.junit.Test;
 
 public class Trace2Test {
 	@Test
+	public void scopedDataNestingIdentifiesItsOwningRegion() {
+		StringWriter out = new StringWriter();
+		try (Trace2 trace = new Trace2(out, false, false, 10, false, null);
+				Trace2.Scope outer = trace.region(null, "test", "outer")) {
+			outer.data("outer", "value");
+			try (Trace2.Scope inner = trace.region(null, "test", "inner")) {
+				inner.dataJson("inner", java.util.Map.of("count", 1));
+			}
+		}
+		out.toString().lines().map(com.google.gson.JsonParser::parseString)
+				.map(com.google.gson.JsonElement::getAsJsonObject)
+				.filter(e -> e.has("key")).forEach(e -> assertEquals(
+						"outer".equals(e.get("key").getAsString()) ? 2 : 3,
+						e.get("nesting").getAsInt()));
+	}
+
+	@Test
+	public void backgroundScopesHaveReceiverCompatibleWorkerLifetimes()
+			throws Exception {
+		StringWriter out = new StringWriter();
+		ExecutorService pool = Executors.newSingleThreadExecutor();
+		try (Trace2 trace = new Trace2(out, false, false, 10, false, null)) {
+			for (int i = 0; i < 2; i++) {
+				pool.submit(() -> {
+					try (Trace2.Scope outer = trace.command(null, "status", "egit");
+							Trace2.Scope inner = trace.region(null, "index", "read")) {
+						throw new IllegalStateException("cancelled");
+					} catch (IllegalStateException expected) {
+						// Both scopes and the implicit worker must close.
+					}
+				}).get();
+			}
+			pool.submit(() -> {
+				try (Trace2.Worker worker = trace.thread("explicit");
+						Trace2.Scope scope = trace.region(null, "index", "read")) {
+					assertTrue(scope.isEnabled());
+				}
+			}).get();
+		} finally {
+			pool.shutdownNow();
+		}
+		String events = out.toString();
+		assertEquals(3, count(events, "thread_start"));
+		assertEquals(3, count(events, "thread_exit"));
+		assertEquals(5, count(events, "region_enter"));
+		assertEquals(5, count(events, "region_leave"));
+		assertTrue(events.contains("\"thread\":\"th1:jgit\""));
+		assertTrue(events.contains("\"thread\":\"th2:jgit\""));
+		assertTrue(events.contains("\"thread\":\"th3:explicit\""));
+		assertTrue(events.indexOf("\"event\":\"thread_start\"")
+				< events.indexOf("\"event\":\"region_enter\""));
+		assertTrue(events.lastIndexOf("\"event\":\"region_leave\"")
+				< events.lastIndexOf("\"event\":\"thread_exit\""));
+	}
+
+	@Test
 	public void hookChildrenInheritOwningCommandHierarchy() throws Exception {
 		StringWriter out = new StringWriter();
 		try (Trace2 trace = new Trace2(out, false, true, 10, false, null)) {
@@ -130,7 +186,7 @@ public class Trace2Test {
 		}
 		assertEquals(2, count(out.toString(), "cmd_name"));
 		assertEquals(2, count(out.toString(), "region_leave"));
-		assertFalse(out.toString().contains("\"nesting\":2"));
+		assertTopLevelRegionNesting(out.toString());
 	}
 
 	@Test
@@ -155,7 +211,7 @@ public class Trace2Test {
 		}
 		assertEquals(40, count(out.toString(), "cmd_name"));
 		assertEquals(40, count(out.toString(), "region_leave"));
-		assertFalse(out.toString().contains("\"nesting\":2"));
+		assertTopLevelRegionNesting(out.toString());
 		for (String line : out.toString().split("\n")) {
 			assertTrue(line.startsWith("{\"event\":"));
 			assertTrue(line.endsWith("}"));
@@ -241,6 +297,14 @@ public class Trace2Test {
 		trace.close();
 		trace.close();
 		assertEquals(1, count(out.toString(), "atexit"));
+	}
+
+	private static void assertTopLevelRegionNesting(String events) {
+		events.lines().map(com.google.gson.JsonParser::parseString)
+				.map(com.google.gson.JsonElement::getAsJsonObject)
+				.filter(e -> e.has("nesting")).forEach(e -> assertEquals(
+						e.get("event").getAsString().startsWith("region_") ? 1 : 2,
+						e.get("nesting").getAsInt()));
 	}
 
 	private static int count(String events, String name) {

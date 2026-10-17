@@ -352,6 +352,14 @@ public final class Trace2 implements AutoCloseable {
 		}
 		Scope scope = new Scope(this, current.get(), repositoryId(repository),
 				category, label);
+		if (scope.parent == null && worker.get() == null
+				&& Thread.currentThread().getId() != mainThread) {
+			// Embedded callers often use pooled threads without explicitly
+			// opening a worker. Receivers need thread_start before regions.
+			// Bound this logical worker to the outer scope, so thread reuse
+			// gets a fresh identity and no context survives job completion.
+			scope.ownedWorker = thread("jgit"); //$NON-NLS-1$
+		}
 		current.set(scope);
 		Map<String, Object> entry = scope.fields();
 		if (message != null) entry.put("msg", message); //$NON-NLS-1$
@@ -855,6 +863,8 @@ public final class Trace2 implements AutoCloseable {
 
 		private ProcessBuilder hookProcess;
 
+		private Worker ownedWorker;
+
 		void hookProcess(ProcessBuilder builder) {
 			if (isEnabled()) {
 				hookProcess = builder;
@@ -926,6 +936,9 @@ public final class Trace2 implements AutoCloseable {
 			}
 			Map<String, Object> f = fields();
 			f.remove("label"); //$NON-NLS-1$
+			// Data describes the contents of this region. Trace2 counts the
+			// implicit process frame as well as the open region stack.
+			f.put("nesting", Integer.valueOf(depth + 1)); //$NON-NLS-1$
 			f.put("key", key); //$NON-NLS-1$
 			f.put("value", value); //$NON-NLS-1$
 			f.put("t_abs", Double.valueOf(elapsed(trace.start))); //$NON-NLS-1$
@@ -959,6 +972,9 @@ public final class Trace2 implements AutoCloseable {
 				trace.current.remove();
 			} else {
 				trace.current.set(parent);
+			}
+			if (ownedWorker != null) {
+				ownedWorker.close();
 			}
 		}
 	}
