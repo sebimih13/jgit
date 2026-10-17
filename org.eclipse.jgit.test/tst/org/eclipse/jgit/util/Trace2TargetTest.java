@@ -11,15 +11,25 @@ package org.eclipse.jgit.util;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeFalse;
 
 import java.io.IOException;
 import java.io.StringWriter;
 import java.io.Writer;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
+import java.nio.channels.Channels;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jgit.internal.trace2.Trace2Destination;
 import org.eclipse.jgit.internal.trace2.Trace2Target;
@@ -27,6 +37,93 @@ import org.eclipse.jgit.internal.trace2.Trace2Target.Format;
 import org.junit.Test;
 
 public class Trace2TargetTest {
+	@Test(timeout = 10000)
+	public void socketSessionSurvivesCommandsAndThreadsUntilClose()
+			throws Exception {
+		assumeFalse(SystemReader.getInstance().isWindows());
+		var directory = Files.createTempDirectory("jgit-trace2-");
+		var socket = directory.resolve("trace.sock");
+		var pool = Executors.newFixedThreadPool(2);
+		try (var server = ServerSocketChannel.open(StandardProtocolFamily.UNIX)) {
+			server.bind(UnixDomainSocketAddress.of(socket));
+			Trace2Destination destination = Trace2Destination.open(
+					"af_unix:stream:" + socket, "socket-session", false);
+			assertNotNull(destination);
+			try (var connection = server.accept();
+					Trace2 trace = new Trace2(List.of(new Trace2Target(destination,
+							Format.EVENT, false, 10)), "socket-session",
+							List.of("jgit", "embedded"))) {
+				var received = pool.submit(() -> {
+					try (var reader = Channels.newReader(connection,
+							StandardCharsets.UTF_8)) {
+						StringBuilder records = new StringBuilder();
+						char[] buffer = new char[1024];
+						for (int n; (n = reader.read(buffer)) != -1;) {
+							records.append(buffer, 0, n);
+						}
+						return records.toString();
+					}
+				});
+				for (int i = 0; i < 2; i++) {
+					pool.submit(() -> {
+						try (Trace2.Scope scope = trace.command(null, "status", "test")) {
+							scope.data("entries", "1");
+						}
+					}).get(5, TimeUnit.SECONDS);
+				}
+				assertFalse("Commands must keep the receiver connection open",
+						received.isDone());
+				trace.close();
+				String events = received.get(5, TimeUnit.SECONDS);
+				assertEquals(1, count(events, "version"));
+				assertEquals(1, count(events, "start"));
+				assertEquals(2, count(events, "region_enter"));
+				assertEquals(2, count(events, "region_leave"));
+				assertEquals(2, count(events, "thread_start"));
+				assertEquals(2, count(events, "thread_exit"));
+				assertEquals(1, count(events, "atexit"));
+				assertTrue(events.stripTrailing().endsWith("}"));
+				server.configureBlocking(false);
+				assertNull("Session must use one connection", server.accept());
+			}
+		} finally {
+			pool.shutdownNow();
+			Files.deleteIfExists(socket);
+			Files.deleteIfExists(directory);
+		}
+	}
+
+	@Test
+	public void failedOwnedDestinationClosesImmediately() {
+		int[] closes = { 0 };
+		Writer broken = new Writer() {
+			@Override
+			public void write(char[] b, int off, int len) {
+				// Simulate a buffered socket failing at flush.
+			}
+
+			@Override
+			public void flush() throws IOException {
+				throw new IOException("disconnected");
+			}
+
+			@Override
+			public void close() throws IOException {
+				closes[0]++;
+				throw new IOException("close failed too");
+			}
+		};
+		Trace2Destination destination = new Trace2Destination(broken, true,
+				false);
+		destination.write("record\n");
+		assertFalse(destination.isEnabled());
+		assertEquals("A failed socket must deliver EOF without JVM shutdown",
+				1, closes[0]);
+		destination.write("continuation must be discarded\n");
+		destination.close();
+		assertEquals("Failed close must not be retried", 1, closes[0]);
+	}
+
 	@Test
 	public void hookIdentityIsIncludedInEventAndPerfTargets() {
 		StringWriter event = new StringWriter();

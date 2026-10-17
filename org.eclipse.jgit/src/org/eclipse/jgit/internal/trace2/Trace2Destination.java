@@ -31,6 +31,8 @@ public final class Trace2Destination implements AutoCloseable {
 
 	private volatile boolean enabled = true;
 
+	private boolean closed;
+
 	private boolean discardSentinel;
 
 	/**
@@ -180,11 +182,20 @@ public final class Trace2Destination implements AutoCloseable {
 				System.err.println(
 						"JGit: Trace2 destination disabled after write failure"); //$NON-NLS-1$
 			}
+			if (owned) {
+				// Match tr2_dst_trace_disable: release a failed destination
+				// immediately. Socket receivers export partial traces at EOF.
+				close();
+			}
 		}
 	}
 
 	@Override
 	public synchronized void close() {
+		if (closed) {
+			return;
+		}
+		closed = true;
 		enabled = false;
 		try {
 			if (owned) {
