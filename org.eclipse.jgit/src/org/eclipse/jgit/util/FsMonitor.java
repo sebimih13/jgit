@@ -161,14 +161,16 @@ public final class FsMonitor {
 
 		/**
 		 * Drop correlation after cancellation, failure or external cache
-		 * updates.
+		 * updates. Preserve any obligation to check contents until monitoring
+		 * can establish a new correlation.
 		 */
 		public synchronized void clear() {
+			boolean checkContents = token != null || fullContentCheckRequired;
 			fingerprint = token = checkedIndex = null;
 			supportedIndex = false;
 			hasUntrackedCache = false;
 			unsupportedIndex = null;
-			fullContentCheckRequired = false;
+			fullContentCheckRequired = checkContents;
 		}
 
 		/**
@@ -180,9 +182,12 @@ public final class FsMonitor {
 		 * @return a probe, or null when a full scan cannot seed this cache
 		 */
 		public synchronized Probe query(Repository repository) {
+			// Once correlation is lost, ordinary stat equality is insufficient
+			// until a successful monitored scan establishes a new token.
+			boolean lostCorrelation = token != null || fullContentCheckRequired;
 			fullContentCheckRequired = false;
 			if (!isEnabled(repository)) {
-				clear();
+				fallback(lostCorrelation);
 				return null;
 			}
 			try (Trace2.Scope trace = Trace2.getInstance().region(repository,
@@ -192,13 +197,13 @@ public final class FsMonitor {
 					Config config = repository.getConfig();
 					if (config.getInt("core", null, "fsmonitorHookVersion", //$NON-NLS-1$ //$NON-NLS-2$
 							2) != 2) {
-						clear();
+						fallback(lostCorrelation);
 						return null;
 					}
 					String hook = config.getString("core", null, "fsmonitor"); //$NON-NLS-1$ //$NON-NLS-2$
 					if (hook == null || hook.isEmpty()
 							|| isBooleanSetting(hook)) {
-						clear();
+						fallback(lostCorrelation);
 						return null;
 					}
 					File executable = new File(hook);
@@ -206,7 +211,7 @@ public final class FsMonitor {
 						executable = new File(repository.getWorkTree(), hook);
 					}
 					if (!executable.isFile() || !executable.canExecute()) {
-						clear();
+						fallback(lostCorrelation);
 						return null;
 					}
 					// A metadata snapshot is sufficient for a negative cache:
@@ -215,6 +220,7 @@ public final class FsMonitor {
 					// data.
 					if (unsupportedIndex != null && !unsupportedIndex
 							.isModified(repository.getIndexFile())) {
+						fullContentCheckRequired = lostCorrelation;
 						return null;
 					}
 					FileSnapshot indexSnapshot = FileSnapshot
@@ -236,6 +242,7 @@ public final class FsMonitor {
 					if (!supportedIndex) {
 						unsupportedIndex = indexSnapshot;
 						fingerprint = token = null;
+						fullContentCheckRequired = lostCorrelation;
 						return null;
 					}
 					unsupportedIndex = null;
@@ -302,17 +309,20 @@ public final class FsMonitor {
 					}
 					trace.data("query/failed", //$NON-NLS-1$
 							failure.getClass().getSimpleName());
-					clear();
-					fullContentCheckRequired = supported;
+					fallback(supported || lostCorrelation);
 					return null;
 				}
 			}
 		}
 
+		private void fallback(boolean checkContents) {
+			clear();
+			fullContentCheckRequired = checkContents;
+		}
+
 		/**
-		 * @return whether the last query encountered uncertainty after
-		 *         validating a supported index, requiring content checks on
-		 *         fallback
+		 * @return whether loss of monitored correlation requires content
+		 *         checks on fallback, including repeated fallback attempts
 		 * @since 7.8
 		 */
 		public synchronized boolean requiresFullContentCheck() {

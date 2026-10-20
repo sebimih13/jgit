@@ -28,6 +28,71 @@ import org.eclipse.jgit.lib.Repository;
 import org.junit.Test;
 
 public class FsMonitorTest extends RepositoryTestCase {
+	@Test
+	public void removedHookStillChecksContentsAfterSuccessfulMonitoring()
+			throws Exception {
+		unavailableHookChecksContents("missing");
+	}
+
+	@Test
+	public void nonexecutableHookStillChecksContentsAfterSuccessfulMonitoring()
+			throws Exception {
+		unavailableHookChecksContents("nonexecutable");
+	}
+
+	@Test
+	public void unsupportedHookVersionStillChecksContentsAfterSuccessfulMonitoring()
+			throws Exception {
+		unavailableHookChecksContents("version");
+	}
+
+	@Test
+	public void booleanHookSettingStillChecksContentsAfterSuccessfulMonitoring()
+			throws Exception {
+		unavailableHookChecksContents("boolean");
+	}
+
+	private void unavailableHookChecksContents(String reason) throws Exception {
+		configure(null);
+		try (Git git = new Git(db)) {
+			File tracked = writeTrashFile("tracked", "one");
+			java.nio.file.attribute.FileTime time = java.nio.file.attribute.FileTime
+					.fromMillis(System.currentTimeMillis() - 60_000);
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			Status initial = git.status().call();
+			assertTrue(initial.isClean());
+			writeTrashFile("tracked", "two");
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			File hook = new File(db.getConfig().getString("core", null,
+					"fsmonitor"));
+			switch (reason) {
+			case "missing":
+				Files.delete(hook.toPath());
+				break;
+			case "nonexecutable":
+				assertTrue(hook.setExecutable(false, false));
+				break;
+			case "version":
+				db.getConfig().setInt("core", null, "fsmonitorHookVersion", 1);
+				break;
+			case "boolean":
+				db.getConfig().setBoolean("core", null, "fsmonitor", false);
+				break;
+			default:
+				throw new AssertionError(reason);
+			}
+			assertEquals(" M tracked\0", new String(nativeGit(null, "status",
+					"--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"),
+					StandardCharsets.UTF_8));
+			assertEquals(reason, Set.of("tracked"),
+					git.status().call().getModified());
+			assertEquals("Repeated fallback must not lose the detected edit",
+					Set.of("tracked"), git.status().call().getModified());
+		}
+	}
+
 	private File response;
 
 	private void configure(String script) throws Exception {
