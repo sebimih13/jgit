@@ -20,9 +20,9 @@ import static org.eclipse.jgit.transport.GitProtocolConstants.CAPABILITY_QUIET;
 import static org.eclipse.jgit.transport.GitProtocolConstants.CAPABILITY_REPORT_STATUS;
 import static org.eclipse.jgit.transport.GitProtocolConstants.CAPABILITY_SIDE_BAND_64K;
 import static org.eclipse.jgit.transport.GitProtocolConstants.OPTION_AGENT;
+import static org.eclipse.jgit.transport.GitProtocolConstants.OPTION_SESSION_ID;
 import static org.eclipse.jgit.transport.GitProtocolConstants.PACKET_ERR;
 import static org.eclipse.jgit.transport.GitProtocolConstants.PACKET_SHALLOW;
-import static org.eclipse.jgit.transport.GitProtocolConstants.OPTION_SESSION_ID;
 import static org.eclipse.jgit.transport.SideBandOutputStream.CH_DATA;
 import static org.eclipse.jgit.transport.SideBandOutputStream.CH_ERROR;
 import static org.eclipse.jgit.transport.SideBandOutputStream.CH_PROGRESS;
@@ -49,11 +49,15 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import org.eclipse.jgit.annotations.Nullable;
+import org.eclipse.jgit.api.errors.AbortedByHookException;
+import org.eclipse.jgit.api.errors.JGitInternalException;
 import org.eclipse.jgit.errors.InvalidObjectIdException;
 import org.eclipse.jgit.errors.LargeObjectException;
 import org.eclipse.jgit.errors.PackProtocolException;
 import org.eclipse.jgit.errors.TooLargePackException;
 import org.eclipse.jgit.errors.UnpackException;
+import org.eclipse.jgit.hooks.GitHook;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.submodule.SubmoduleValidator;
 import org.eclipse.jgit.internal.submodule.SubmoduleValidator.SubmoduleValidationException;
@@ -65,6 +69,7 @@ import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.GitmoduleEntry;
+import org.eclipse.jgit.lib.HookConfig;
 import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ObjectChecker;
 import org.eclipse.jgit.lib.ObjectDatabase;
@@ -346,7 +351,7 @@ public class ReceivePack {
 	 */
 	class MessageOutputWrapper extends OutputStream {
 		@Override
-		public void write(int ch) {
+		public synchronized void write(int ch) {
 			if (msgOut != null) {
 				try {
 					msgOut.write(ch);
@@ -357,7 +362,7 @@ public class ReceivePack {
 		}
 
 		@Override
-		public void write(byte[] b, int off, int len) {
+		public synchronized void write(byte[] b, int off, int len) {
 			if (msgOut != null) {
 				try {
 					msgOut.write(b, off, len);
@@ -373,7 +378,7 @@ public class ReceivePack {
 		}
 
 		@Override
-		public void flush() {
+		public synchronized void flush() {
 			if (msgOut != null) {
 				try {
 					msgOut.flush();
@@ -1850,6 +1855,50 @@ public class ReceivePack {
 		if (toApply.isEmpty())
 			return;
 
+		if (!hasReceiveHook("update")) { //$NON-NLS-1$
+			// Retain the existing batch path when no update hook is installed.
+			executeBatch(toApply);
+			return;
+		}
+
+		if (!atomic) {
+			// Match the reference implementation's deletion and update phases.
+			for (boolean deletions : new boolean[] { true, false }) {
+				List<ReceiveCommand> phase = new ArrayList<>();
+				for (ReceiveCommand command : toApply) {
+					if (ObjectId.zeroId().equals(command.getNewId()) == deletions) {
+						phase.add(command);
+					}
+				}
+				runUpdateHooks(phase);
+				phase.removeIf(c -> c.getResult() != Result.NOT_ATTEMPTED);
+				if (!phase.isEmpty()) {
+					executeBatch(phase);
+				}
+			}
+			return;
+		}
+		runUpdateHooks(toApply);
+		if (anyRejects()) {
+			failPendingCommands();
+		}
+		toApply = filterCommands(Result.NOT_ATTEMPTED);
+		if (!toApply.isEmpty()) {
+			executeBatch(toApply);
+		}
+	}
+
+	private void runUpdateHooks(List<ReceiveCommand> toApply) {
+		for (ReceiveCommand command : toApply) {
+			if (runReceiveHook(Hooks.update(db, command, msgOutWrapper,
+					msgOutWrapper))) {
+				command.setResult(Result.REJECTED_OTHER_REASON,
+						JGitText.get().updateHookDeclined);
+			}
+		}
+	}
+
+	private void executeBatch(List<ReceiveCommand> toApply) {
 		ProgressMonitor updating = NullProgressMonitor.INSTANCE;
 		if (sideBand) {
 			SideBandProgressMonitor pm = new SideBandProgressMonitor(msgOut);
@@ -1870,6 +1919,29 @@ public class ReceivePack {
 			receiveCommandErrorHandler.handleBatchRefUpdateException(toApply,
 					e);
 		}
+	}
+
+	private boolean runReceiveHook(GitHook<?> hook) {
+		if (db.getDirectory() == null) {
+			return false;
+		}
+		try {
+			hook.call();
+			return false;
+		} catch (AbortedByHookException e) {
+			return true;
+		} catch (IOException e) {
+			throw new JGitInternalException(MessageFormat.format(
+					JGitText.get().exceptionCaughtDuringExecutionOfHook,
+					hook.getHookName()), e);
+		}
+	}
+
+	private boolean hasReceiveHook(String name) {
+		return db.getDirectory() != null
+				&& (db.getFS().findHook(db, name) != null
+						|| db.getConfig().get(HookConfig.KEY).getCommands(name)
+								.stream().anyMatch(HookConfig.Command::enabled));
 	}
 
 	/**
@@ -2320,6 +2392,16 @@ public class ReceivePack {
 					Instant startPreReceive = Instant.now();
 					preReceive.onPreReceive(
 							this, filterCommands(Result.NOT_ATTEMPTED));
+					List<ReceiveCommand> pending = filterCommands(
+							Result.NOT_ATTEMPTED);
+					if (!pending.isEmpty() && hasReceiveHook("pre-receive") //$NON-NLS-1$
+							&& runReceiveHook(Hooks.preReceive(db, pending,
+									msgOutWrapper, msgOutWrapper))) {
+						for (ReceiveCommand command : pending) {
+							command.setResult(Result.REJECTED_OTHER_REASON,
+									JGitText.get().preReceiveHookDeclined);
+						}
+					}
 					timePreReceiveHooks = Duration.between(startPreReceive, Instant.now()).toMillis();
 					if (atomic && anyRejects()) {
 						failPendingCommands();
@@ -2383,6 +2465,17 @@ public class ReceivePack {
 	private class PostReceiveExecutor implements AutoCloseable {
 		@Override
 		public void close() {
+			List<ReceiveCommand> updated = filterCommands(Result.OK);
+			if (!updated.isEmpty()) {
+				if (hasReceiveHook("post-receive")) { //$NON-NLS-1$
+					runReceiveHook(Hooks.postReceive(db, updated,
+							msgOutWrapper, msgOutWrapper));
+				}
+				if (hasReceiveHook("post-update")) { //$NON-NLS-1$
+					runReceiveHook(Hooks.postUpdate(db, updated,
+							msgOutWrapper, msgOutWrapper));
+				}
+			}
 			postReceive.onPostReceive(ReceivePack.this,
 					filterCommands(Result.OK));
 		}

@@ -65,6 +65,7 @@ import java.util.stream.Stream;
 
 import org.eclipse.jgit.annotations.NonNull;
 import org.eclipse.jgit.api.PackRefsCommand;
+import org.eclipse.jgit.api.errors.AbortedByHookException;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.errors.CancelledException;
@@ -72,6 +73,7 @@ import org.eclipse.jgit.errors.CorruptObjectException;
 import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.errors.MissingObjectException;
 import org.eclipse.jgit.errors.NoWorkTreeException;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.storage.commitgraph.CommitGraphWriter;
 import org.eclipse.jgit.internal.storage.commitgraph.GraphCommits;
@@ -106,7 +108,6 @@ import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FS.LockToken;
 import org.eclipse.jgit.util.FileUtils;
 import org.eclipse.jgit.util.GitTimeParser;
-import org.eclipse.jgit.util.ProcessResult;
 import org.eclipse.jgit.util.StringUtils;
 import org.eclipse.jgit.util.SystemReader;
 import org.slf4j.Logger;
@@ -251,10 +252,9 @@ public class GC {
 			if (!needGc()) {
 				return CompletableFuture.completedFuture(Collections.emptyList());
 			}
-			ProcessResult hook = repo.getFS()
-					.runHookIfPresent(repo, "pre-auto-gc", new String[0], //$NON-NLS-1$
-							System.err, System.err, null);
-			if (hook.isExecutedWithError()) {
+			try {
+				Hooks.preAutoGc(repo, System.err, System.err).call();
+			} catch (AbortedByHookException e) {
 				return CompletableFuture.completedFuture(Collections.emptyList());
 			}
 		}

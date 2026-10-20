@@ -2253,6 +2253,10 @@ public abstract class FS {
 			environment.put("GIT_INDEX_FILE", //$NON-NLS-1$
 					repository.getIndexFile().getAbsolutePath());
 			break;
+		case "post-index-change": //$NON-NLS-1$
+			environment.put("GIT_INDEX_FILE", //$NON-NLS-1$
+					repository.getIndexFile().getAbsolutePath());
+			break;
 		default:
 			break;
 		}

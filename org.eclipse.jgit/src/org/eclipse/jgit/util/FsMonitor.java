@@ -19,13 +19,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
-import java.util.ArrayList;
 import java.util.TreeSet;
-import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.internal.storage.file.FileSnapshot;
 import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Constants;
@@ -45,10 +45,6 @@ import org.eclipse.jgit.lib.Repository;
  * @since 7.8
  */
 public final class FsMonitor {
-	private static final int MAX_RESPONSE = 16 * 1024 * 1024;
-
-	private static final int TIMEOUT_SECONDS = 5;
-
 	private FsMonitor() {
 	}
 
@@ -256,7 +252,7 @@ public final class FsMonitor {
 					// Other v2 providers may reject it; rejection requires a
 					// full scan.
 					String since = token == null ? "c:0:0:0:0" : token; //$NON-NLS-1$
-					byte[] response = run(repository, executable, since);
+					byte[] response = Hooks.fsMonitor(repository, executable, since).call();
 					String[] records = parse(response);
 					if (records == null) {
 						trace.data("query/failed", "invalid-response"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -487,65 +483,6 @@ public final class FsMonitor {
 		return HexFormat.of().formatHex(md.digest());
 	}
 
-	private static byte[] run(Repository repo, File hook, String token)
-			throws Exception {
-		Path output = Files.createTempFile("jgit-fsmonitor-", ".response"); //$NON-NLS-1$ //$NON-NLS-2$
-		Process process = null;
-		Trace2.Child child = null;
-		try {
-			ProcessBuilder builder = new ProcessBuilder(hook.getAbsolutePath(),
-					"2", token); //$NON-NLS-1$
-			builder.directory(repo.getWorkTree());
-			builder.redirectError(ProcessBuilder.Redirect.DISCARD);
-			builder.redirectOutput(output.toFile());
-			Trace2 trace = Trace2.getInstance();
-			if (trace.isEnabled()) {
-				builder.command().set(2, "<redacted>"); //$NON-NLS-1$
-				try {
-					child = trace.childStart(builder);
-				} finally {
-					builder.command().set(2, token);
-				}
-			}
-			process = builder.start();
-			long deadline = System.nanoTime()
-					+ TimeUnit.SECONDS.toNanos(TIMEOUT_SECONDS);
-			while (!process.waitFor(50, TimeUnit.MILLISECONDS)) {
-				if (Files.size(output) > MAX_RESPONSE
-						|| System.nanoTime() >= deadline) {
-					throw new IOException("fsmonitor timeout/output limit"); //$NON-NLS-1$
-				}
-			}
-			if (child != null) {
-				child.exit(process.pid(), process.exitValue());
-			}
-			if (process.exitValue() != 0) {
-				throw new IOException("fsmonitor failed"); //$NON-NLS-1$
-			}
-			try (InputStream in = Files.newInputStream(output)) {
-				byte[] bytes = in.readNBytes(MAX_RESPONSE + 1);
-				if (bytes.length > MAX_RESPONSE) {
-					throw new IOException("fsmonitor output limit"); //$NON-NLS-1$
-				}
-				return bytes;
-			}
-		} finally {
-			try {
-				if (process != null && process.isAlive()) {
-					process.descendants()
-							.forEach(ProcessHandle::destroyForcibly);
-					process.destroyForcibly();
-					if (process.waitFor(1, TimeUnit.SECONDS) && child != null) {
-						child.exit(process.pid(), process.exitValue());
-					}
-				} else if (process == null && child != null) {
-					child.exit(-1, -1);
-				}
-			} finally {
-				Files.deleteIfExists(output);
-			}
-		}
-	}
 
 	static String[] parse(byte[] response) throws CharacterCodingException {
 		if (response.length == 0) {

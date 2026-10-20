@@ -30,6 +30,8 @@ public class JGitText extends TranslationBundle {
 	}
 
 	// @formatter:off
+	/***/ public String preReceiveHookDeclined;
+	/***/ public String updateHookDeclined;
 	/***/ public String abbreviationLengthMustBeNonNegative;
 	/***/ public String abortingRebase;
 	/***/ public String abortingRebaseFailed;

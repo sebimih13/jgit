@@ -370,7 +370,9 @@ public class ResetCommand extends GitCommand<Ref> {
 				}
 			}
 
-			builder.commit();
+			builder.finish();
+			dc.write();
+			dc.commit(false, true);
 		} catch (IOException e) {
 			throw new RuntimeException(e);
 		} finally {
@@ -414,7 +416,9 @@ public class ResetCommand extends GitCommand<Ref> {
 				builder.add(entry);
 			}
 
-			builder.commit();
+			builder.finish();
+			dc.write();
+			dc.commit(false, true);
 		} finally {
 			dc.unlock();
 		}

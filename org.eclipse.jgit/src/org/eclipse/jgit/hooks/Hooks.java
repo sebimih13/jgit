@@ -9,9 +9,14 @@
  */
 package org.eclipse.jgit.hooks;
 
+import java.io.File;
+import java.io.OutputStream;
 import java.io.PrintStream;
-import org.eclipse.jgit.lib.Repository;
+import java.util.Collection;
+
 import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.transport.ReceiveCommand;
 import org.eclipse.jgit.util.LfsFactory;
 
 /**
@@ -20,6 +25,118 @@ import org.eclipse.jgit.util.LfsFactory;
  * @since 4.0
  */
 public class Hooks {
+
+	/**
+	 * Create a binary FSMonitor v2 query of the configured executable.
+	 * @param repo repository
+	 * @param executable executable selected by core.fsmonitor
+	 * @param token previous provider token
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static FsMonitorHook fsMonitor(Repository repo, File executable,
+			String token) {
+		return new FsMonitorHook(repo, executable, token);
+	}
+
+	/**
+	 * Create a pre-auto-gc verification hook.
+	 * @param repo repository
+	 * @param output hook stdout, or null for System.out
+	 * @param error hook stderr, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PreAutoGcHook preAutoGc(Repository repo, OutputStream output,
+			OutputStream error) {
+		return new PreAutoGcHook(repo, output, error);
+	}
+
+	/**
+	 * Create a pre-receive verification hook.
+	 * @param repo repository
+	 * @param commands proposed reference updates in input order
+	 * @param output hook stdout, or null for System.out
+	 * @param error hook stderr, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PreReceiveHook preReceive(Repository repo,
+			Collection<ReceiveCommand> commands, OutputStream output,
+			OutputStream error) {
+		return new PreReceiveHook(repo, commands, output, error);
+	}
+
+	/**
+	 * Create an update verification hook.
+	 * @param repo repository
+	 * @param command proposed reference update
+	 * @param output hook stdout, or null for System.out
+	 * @param error hook stderr, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static UpdateHook update(Repository repo, ReceiveCommand command,
+			OutputStream output, OutputStream error) {
+		return new UpdateHook(repo, command, output, error);
+	}
+
+	/**
+	 * Create a post-receive notification hook.
+	 * @param repo repository
+	 * @param commands successfully applied updates in input order
+	 * @param output hook stdout, or null for System.err
+	 * @param error hook stderr, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PostReceiveHook postReceive(Repository repo,
+			Collection<ReceiveCommand> commands, OutputStream output,
+			OutputStream error) {
+		return new PostReceiveHook(repo, commands, output, error);
+	}
+
+	/**
+	 * Create a post-update notification hook.
+	 * @param repo repository
+	 * @param commands successfully applied reference updates
+	 * @param output hook stdout, or null for System.err
+	 * @param error hook stderr, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PostUpdateHook postUpdate(Repository repo,
+			Collection<ReceiveCommand> commands, OutputStream output,
+			OutputStream error) {
+		return new PostUpdateHook(repo, commands, output, error);
+	}
+
+	/**
+	 * Create a post-index-change notification hook.
+	 * @param repo repository
+	 * @param updatedWorkTree whether unpacking trees updated the working tree
+	 * @param updatedSkipWorkTree whether skip-worktree bits could have changed
+	 * @param output hook stdout, or null for System.err
+	 * @param error hook stderr, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PostIndexChangeHook postIndexChange(Repository repo,
+			boolean updatedWorkTree, boolean updatedSkipWorkTree,
+			OutputStream output, OutputStream error) {
+		return new PostIndexChangeHook(repo, updatedWorkTree,
+				updatedSkipWorkTree, output, error);
+	}
+
+	static String receiveHookInput(Collection<ReceiveCommand> updates) {
+		StringBuilder input = new StringBuilder();
+		for (ReceiveCommand command : updates) {
+			input.append(command.getOldId().name()).append(' ')
+					.append(command.getNewId().name()).append(' ')
+					.append(command.getRefName()).append('\n');
+		}
+		return input.toString();
+	}
 
 	/**
 	 * Create a post-rewrite notification.

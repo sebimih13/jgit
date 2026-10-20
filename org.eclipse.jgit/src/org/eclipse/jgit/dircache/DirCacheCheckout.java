@@ -650,7 +650,9 @@ public class DirCacheCheckout {
 			monitor.endTask();
 
 			// commit the index builder - a new index is persisted
-			if (!builder.commit())
+			builder.finish();
+			dc.write();
+			if (!dc.commit(true, false))
 				throw new IndexWriteException();
 		}
 		return toBeDeleted.isEmpty();
