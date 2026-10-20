@@ -779,6 +779,8 @@ public abstract class Transport implements AutoCloseable {
 	/** Should push just check for operation result, not really push. */
 	private boolean dryRun;
 
+	private boolean runPrePushHook = true;
+
 	/** Should an incoming (fetch) transfer validate objects? */
 	private ObjectChecker objectChecker;
 
@@ -891,6 +893,16 @@ public abstract class Transport implements AutoCloseable {
 	 */
 	public void setHookOutputStream(PrintStream redirect) {
 		hookOutRedirect = redirect;
+	}
+
+	/**
+	 * Enable or bypass the local pre-push hook. Enabled by default.
+	 *
+	 * @param run whether the local pre-push hook should run
+	 * @since 7.8
+	 */
+	public void setRunPrePushHook(boolean run) {
+		runPrePushHook = run;
 	}
 
 	/**
@@ -1526,7 +1538,7 @@ public abstract class Transport implements AutoCloseable {
 		}
 
 		PrePushHook prePush = null;
-		if (local != null) {
+		if (local != null && runPrePushHook) {
 			// Pushing will always have a local repository. But better safe than
 			// sorry.
 			prePush = Hooks.prePush(local, hookOutRedirect, hookErrRedirect);

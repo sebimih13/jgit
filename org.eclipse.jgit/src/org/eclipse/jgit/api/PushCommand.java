@@ -72,6 +72,8 @@ public class PushCommand extends
 	private String receivePack = RemoteConfig.DEFAULT_RECEIVE_PACK;
 
 	private boolean dryRun;
+
+	private boolean noVerify;
 	private boolean atomic;
 	private boolean force;
 	private boolean thin = Transport.DEFAULT_PUSH_THIN;
@@ -165,6 +167,7 @@ public class PushCommand extends
 				if (receivePack != null)
 					transport.setOptionReceivePack(receivePack);
 				transport.setDryRun(dryRun);
+				transport.setRunPrePushHook(!noVerify);
 				transport.setPushOptions(pushOptions);
 				transport.setPushUseBitmaps(useBitmaps);
 				transport.setHookOutputStream(hookOutRedirect);
@@ -321,6 +324,20 @@ public class PushCommand extends
 	public PushCommand setRemote(String remote) {
 		checkCallable();
 		this.remote = remote;
+		return this;
+	}
+
+	/**
+	 * Bypass the local pre-push hook, like {@code git push --no-verify}.
+	 * Server-side verification is unaffected.
+	 *
+	 * @param noVerify whether to bypass the pre-push hook
+	 * @return this command
+	 * @since 7.8
+	 */
+	public PushCommand setNoVerify(boolean noVerify) {
+		checkCallable();
+		this.noVerify = noVerify;
 		return this;
 	}
 

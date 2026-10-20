@@ -20,9 +20,41 @@ public class PrePushHookCommandTest extends PrePushHookTestCase {
 	@Override
 	protected PushResult push(String remote, List<RefSpec> specifications)
 			throws Exception {
+		return executePush(remote, specifications, false);
+	}
+
+	@Override
+	protected PushResult pushWithoutVerification(String remote,
+			List<RefSpec> specifications) throws Exception {
+		return executePush(remote, specifications, true);
+	}
+
+	private PushResult executePush(String remote, List<RefSpec> specifications,
+			boolean noVerify) throws Exception {
 		try (Git git = Git.wrap(db)) {
-			return git.push().setRemote(remote).setRefSpecs(specifications)
-					.call().iterator().next();
+			return git.push().setRemote(remote).setPushDefault(null)
+					.setNoVerify(noVerify).setRefSpecs(specifications).call()
+					.iterator().next();
 		}
 	}
+
+	@org.junit.Test
+	public void legacyApiDefaultRemainsCurrent() throws Exception {
+		db.getConfig().setString("branch", "main", "remote", "parent1");
+		db.getConfig().setString("branch", "main", "merge",
+				"refs/heads/foreign");
+		db.getConfig().setString("push", null, "default", "upstream");
+		db.getConfig().save();
+		installPrePush(0);
+		try (Git git = Git.wrap(db)) {
+			PushCommand command = git.push().setRemote("parent1");
+			org.junit.Assert.assertEquals(
+					org.eclipse.jgit.transport.PushConfig.PushDefault.CURRENT,
+					command.getPushDefault());
+			command.call();
+		}
+		org.junit.Assert.assertEquals(next, server.resolve("refs/heads/main"));
+		org.junit.Assert.assertNull(server.exactRef("refs/heads/foreign"));
+	}
+
 }

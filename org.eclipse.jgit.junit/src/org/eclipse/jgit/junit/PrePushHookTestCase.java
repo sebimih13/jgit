@@ -70,6 +70,22 @@ public abstract class PrePushHookTestCase extends RepositoryTestCase {
 			List<RefSpec> specifications) throws Exception;
 
 	/**
+	 * Execute a push with local verification bypassed.
+	 *
+	 * @param remote
+	 *            configured remote or URL
+	 * @param specifications
+	 *            requested reference mappings
+	 * @return push result
+	 * @throws Exception
+	 *             if the adapter cannot execute the operation
+	 */
+	protected PushResult pushWithoutVerification(String remote,
+			List<RefSpec> specifications) throws Exception {
+		throw new UnsupportedOperationException();
+	}
+
+	/**
 	 * Prepare the source history and empty destination.
 	 *
 	 * @throws Exception
@@ -145,6 +161,235 @@ public abstract class PrePushHookTestCase extends RepositoryTestCase {
 			git.push().setRemote(location)
 					.setRefSpecs(new RefSpec(value.name() + ":" + name)).call();
 		}
+	}
+
+	/**
+	 * Verify successful local hooks are bypassed.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifySkipsSuccessfulHook() throws Exception {
+		bypassLocalHook(0);
+	}
+
+	/**
+	 * Verify failing local hooks are bypassed.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifySkipsFailingHook() throws Exception {
+		bypassLocalHook(7);
+	}
+
+	private void bypassLocalHook(int code) throws Exception {
+		installPrePush(code);
+		pushWithoutVerification("parent1",
+				List.of(new RefSpec("HEAD:refs/heads/foreign")));
+		assertEquals(next, server.resolve("refs/heads/foreign"));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("pre-push.input")));
+	}
+
+	/**
+	 * Verify local bypass cannot disable receiving-repository verification.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifyStillRunsServerHooks() throws Exception {
+		installPrePush(7);
+		Path receiver = server.getDirectory().toPath()
+				.resolve("hooks/pre-receive");
+		Files.createDirectories(receiver.getParent());
+		Files.writeString(receiver,
+				"#!/bin/sh\ncat >/dev/null\necho rejected >\"$GIT_DIR/pre-receive.was-run\"\nexit 7\n");
+		assertTrue(FS.DETECTED.setExecute(receiver.toFile(), true));
+		PushResult result = pushWithoutVerification(location,
+				List.of(new RefSpec("HEAD:refs/heads/foreign")));
+		assertEquals(
+				org.eclipse.jgit.transport.RemoteRefUpdate.Status.REJECTED_OTHER_REASON,
+				result.getRemoteUpdate("refs/heads/foreign").getStatus());
+		assertNull(server.exactRef("refs/heads/foreign"));
+		assertTrue(Files.exists(
+				server.getDirectory().toPath().resolve("pre-receive.was-run")));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("pre-push.input")));
+	}
+
+	private void upstream(String branch, String remote, String destination)
+			throws IOException {
+		db.getConfig().setString("branch", branch, "remote", remote);
+		db.getConfig().setString("branch", branch, "merge", destination);
+		db.getConfig().save();
+	}
+
+	private Repository otherRemote() throws Exception {
+		try (Git git = Git.init().setBare(true).setDirectory(
+				new java.io.File(getTemporaryDirectory(), "pre-push-other.git"))
+				.call()) {
+			Repository other = git.getRepository();
+			other.incrementOpen();
+			addRepoToClose(other);
+			db.getConfig().setString("remote", "parent2", "url",
+					new URIish(other.getDirectory().toURI().toString())
+							.toString());
+			db.getConfig().save();
+			return other;
+		}
+	}
+
+	/**
+	 * Verify push without arguments follows its configured upstream.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void defaultPushUsesUpstreamBranchAndRemote() throws Exception {
+		seed("refs/heads/foreign", first);
+		try (Git git = Git.wrap(db)) {
+			git.checkout().setCreateBranch(true).setName("other").call();
+		}
+		upstream("other", "parent1", "refs/heads/foreign");
+		db.getConfig().setString("push", null, "default", "upstream");
+		db.getConfig().save();
+		installPrePush(0);
+		push(null, List.of());
+		assertEquals("2\nparent1\n" + location + "\n", arguments());
+		assertEquals("refs/heads/other " + next.name() + " refs/heads/foreign "
+				+ first.name() + "\n", input());
+		assertEquals(next, server.resolve("refs/heads/foreign"));
+		assertNull(server.exactRef("refs/heads/other"));
+	}
+
+	/**
+	 * Verify an explicitly named remote still uses push.default=upstream.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void namedPushUsesConfiguredUpstreamDestination() throws Exception {
+		seed("refs/heads/foreign", first);
+		upstream("main", "parent1", "refs/heads/foreign");
+		db.getConfig().setString("push", null, "default", "upstream");
+		db.getConfig().save();
+		installPrePush(0);
+		push("parent1", List.of());
+		assertEquals("refs/heads/main " + next.name() + " refs/heads/foreign "
+				+ first.name() + "\n", input());
+		assertEquals(next, server.resolve("refs/heads/foreign"));
+		assertNull(server.exactRef("refs/heads/main"));
+	}
+
+	/**
+	 * Verify simple mode rejects a differently named upstream before hooks.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void simpleMismatchRejectsBeforePrePushHook() throws Exception {
+		upstream("main", "parent1", "refs/heads/foreign");
+		db.getConfig().setString("push", null, "default", "simple");
+		db.getConfig().save();
+		installPrePush(0);
+		try {
+			push(null, List.of());
+			fail("Simple mode must reject a differently named upstream");
+		} catch (Exception expected) {
+			assertTrue(server.getRefDatabase().getRefs().isEmpty());
+		}
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("pre-push.input")));
+	}
+
+	/**
+	 * Verify upstream mode requires an upstream before running hooks.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void missingUpstreamRejectsBeforePrePushHook() throws Exception {
+		db.getConfig().setString("push", null, "default", "upstream");
+		db.getConfig().save();
+		installPrePush(0);
+		try {
+			push("parent1", List.of());
+			fail("Upstream mode must require an upstream");
+		} catch (Exception expected) {
+			assertTrue(server.getRefDatabase().getRefs().isEmpty());
+		}
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("pre-push.input")));
+	}
+
+	/**
+	 * Verify current mode overrides an upstream destination.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void explicitCurrentUsesLocalBranchName() throws Exception {
+		upstream("main", "parent1", "refs/heads/foreign");
+		db.getConfig().setString("push", null, "default", "current");
+		db.getConfig().save();
+		installPrePush(0);
+		push(null, List.of());
+		assertEquals("refs/heads/main " + next.name() + " refs/heads/main "
+				+ ObjectId.zeroId().name() + "\n", input());
+		assertEquals(next, server.resolve("refs/heads/main"));
+		assertNull(server.exactRef("refs/heads/foreign"));
+	}
+
+	/**
+	 * Verify remote.pushDefault routes the push to another repository.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void globalPushRemoteOverridesFetchRemote() throws Exception {
+		Repository other = otherRemote();
+		upstream("main", "parent1", "refs/heads/main");
+		db.getConfig().setString("remote", null, "pushDefault", "parent2");
+		db.getConfig().setString("push", null, "default", "current");
+		db.getConfig().save();
+		installPrePush(0);
+		push(null, List.of());
+		assertEquals("2\nparent2\n"
+				+ db.getConfig().getString("remote", "parent2", "url") + "\n",
+				arguments());
+		assertEquals(next, other.resolve("refs/heads/main"));
+		assertTrue(server.getRefDatabase().getRefs().isEmpty());
+	}
+
+	/**
+	 * Verify branch.pushRemote takes precedence over remote.pushDefault.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void branchPushRemoteOverridesGlobalPushRemote() throws Exception {
+		Repository other = otherRemote();
+		upstream("main", "parent1", "refs/heads/main");
+		db.getConfig().setString("remote", null, "pushDefault", "parent2");
+		db.getConfig().setString("branch", "main", "pushRemote", "parent1");
+		db.getConfig().setString("push", null, "default", "current");
+		db.getConfig().save();
+		installPrePush(0);
+		push(null, List.of());
+		assertEquals("2\nparent1\n" + location + "\n", arguments());
+		assertEquals(next, server.resolve("refs/heads/main"));
+		assertTrue(other.getRefDatabase().getRefs().isEmpty());
 	}
 
 	/**

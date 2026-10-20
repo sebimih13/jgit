@@ -48,6 +48,17 @@ public abstract class CommitHookTestCase extends RepositoryTestCase {
 	protected abstract RevCommit commitStaged() throws Exception;
 
 	/**
+	 * Commit while bypassing pre-commit and commit-msg verification.
+	 *
+	 * @return resulting commit
+	 * @throws Exception
+	 *             if the adapter cannot execute the operation
+	 */
+	protected RevCommit commitWithoutVerification() throws Exception {
+		throw new UnsupportedOperationException();
+	}
+
+	/**
 	 * Prepare the parent commit and staged changes before installing hooks.
 	 *
 	 * @throws Exception
@@ -262,4 +273,80 @@ public abstract class CommitHookTestCase extends RepositoryTestCase {
 		assertEquals(initial, commit.getParent(0));
 		assertEquals("post-commit\n", records());
 	}
+
+	/**
+	 * Verify bypass succeeds without installed hooks.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifyWithNoHookCommits() throws Exception {
+		assertEquals(initial, commitWithoutVerification().getParent(0));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("actual-hooks")));
+	}
+
+	/**
+	 * Verify successful verification hooks are bypassed.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifySkipsSuccessfulPreCommit() throws Exception {
+		bypassPreCommit(0, true);
+	}
+
+	/**
+	 * Verify failed verification hooks are bypassed.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifySkipsFailingPreCommit() throws Exception {
+		bypassPreCommit(1, true);
+	}
+
+	/**
+	 * Verify bypass also succeeds with a non-executable script.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifyWithNonExecutablePreCommit() throws Exception {
+		bypassPreCommit(1, false);
+	}
+
+	private void bypassPreCommit(int code, boolean executable)
+			throws Exception {
+		Path script = hook("pre-commit",
+				record("unexpected") + "exit " + code + "\n");
+		assertTrue(FS.DETECTED.setExecute(script.toFile(), executable));
+		assertEquals(initial, commitWithoutVerification().getParent(0));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("actual-hooks")));
+	}
+
+	/**
+	 * Verify preparation and notification remain enabled under bypass.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifyStillPreparesAndNotifies() throws Exception {
+		hook("pre-commit", record("unexpected-pre-commit") + "exit 7\n");
+		hook("commit-msg", record("unexpected-commit-msg") + "exit 7\n");
+		hook("prepare-commit-msg", record("prepare-commit-msg")
+				+ "printf 'prepared message\\n' >\"$1\"\n");
+		hook("post-commit", record("post-commit"));
+		RevCommit commit = commitWithoutVerification();
+		assertEquals(initial, commit.getParent(0));
+		assertEquals("prepared message\n", commit.getFullMessage());
+		assertEquals("prepare-commit-msg\npost-commit\n", records());
+	}
+
 }
