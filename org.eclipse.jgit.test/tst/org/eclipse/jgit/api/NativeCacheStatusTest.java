@@ -10,9 +10,9 @@
 package org.eclipse.jgit.api;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.file.Files;
@@ -340,6 +340,119 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		}
 		reply("nested/.git");
 		assertEquals(Set.of("nested"), check().getUntracked());
+	}
+
+	// t7063: a tracked directory replaced by a symlink stays clean through
+	// repeated checkouts with both untracked-cache settings.
+	@Test
+	public void directoryToSymlinkCheckoutDoesNotLeaveCachedChildren()
+			throws Exception {
+		Assume.assumeTrue(FS.DETECTED.supportsSymlinks());
+		assertCleanReplacementCheckouts(true);
+	}
+
+	// t7063: the same checkout transition with a regular file at the old
+	// directory path must not leak the old directory listing.
+	@Test
+	public void directoryToFileCheckoutDoesNotLeaveCachedChildren()
+			throws Exception {
+		assertCleanReplacementCheckouts(false);
+	}
+
+	private void assertCleanReplacementCheckouts(boolean symlink)
+			throws Exception {
+		put("one/file", "");
+		put("two/file", "");
+		git.add().addFilepattern(".").call();
+		var first = git.commit().setMessage("first commit").call();
+		git.rm().addFilepattern("one/file").call();
+		Path one = db.getWorkTree().toPath().resolve("one");
+		Files.deleteIfExists(one);
+		if (symlink) {
+			Files.createSymbolicLink(one, Path.of("two"));
+		} else {
+			Files.writeString(one, "");
+		}
+		git.add().addFilepattern("one").call();
+		var second = git.commit().setMessage("second commit").call();
+		git.status().call();
+		for (var target : List.of(first, second, first, second)) {
+			git.checkout().setName(target.name()).call();
+			reply();
+			Status actual = check();
+			assertTrue(actual.getAdded().isEmpty());
+			assertTrue(actual.getChanged().isEmpty());
+			assertTrue(actual.getRemoved().isEmpty());
+			assertTrue(actual.getModified().isEmpty());
+			assertTrue(actual.getMissing().isEmpty());
+			assertTrue(actual.getUntracked().isEmpty());
+			git.status().call();
+			reply();
+			equal(actual, git.status().call());
+		}
+	}
+
+	// t7063: directory summaries must disappear and reappear when the last
+	// untracked file in a subdirectory moves into and out of the index.
+	@Test
+	public void subdirectoryMembershipTransitionsInvalidateCachedSummaries()
+			throws Exception {
+		untrackedFixture();
+		git.status().call();
+		git.add().addFilepattern("dtwo/two").call();
+		reply();
+		Status staged = check();
+		assertEquals(Set.of("one", "two", "done/one", "dtwo/two"),
+				staged.getAdded());
+		assertEquals(Set.of("three", "dthree/three"), staged.getUntracked());
+		git.status().call();
+		git.rm().setCached(true).addFilepattern("dtwo/two").call();
+		reply();
+		Status unstaged = check();
+		assertEquals(Set.of("one", "two", "done/one"), unstaged.getAdded());
+		assertEquals(Set.of("three", "dtwo/two", "dthree/three"),
+				unstaged.getUntracked());
+	}
+
+	// t7063: checkout and commit retain correct untracked results. This tests
+	// observable results; native UNTR payload/counter preservation is separate.
+	@Test
+	public void checkoutAndCommitPreserveUntrackedResults() throws Exception {
+		fsmonitorFixture();
+		put("loose", "root untracked");
+		put("dir1/loose", "nested untracked");
+		Set<String> expected = Set.of("loose", "dir1/loose");
+		var initial = db.resolve("HEAD");
+		git.status().call();
+		git.checkout().setCreateBranch(true).setName("cache-transition").call();
+		reply();
+		assertEquals(expected, check().getUntracked());
+		git.status().call();
+		put("tracked", "changed tracked content");
+		git.add().addFilepattern("tracked").call();
+		git.commit().setMessage("commit with warm cache").call();
+		reply();
+		assertEquals(expected, check().getUntracked());
+		git.status().call();
+		git.checkout().setName(initial.name()).call();
+		reply();
+		assertEquals(expected, check().getUntracked());
+	}
+
+	// t7063: nested untracked directory creation after an already cached scan.
+	@Test
+	public void newlyCreatedNestedDirectoriesInvalidateCachedSummaries()
+			throws Exception {
+		untrackedFixture();
+		git.status().call();
+		put("done/sub/sub/file", "sub");
+		reply("done/sub/");
+		Set<String> expected = Set.of("three", "dtwo/two", "dthree/three",
+				"done/sub/sub/file");
+		assertEquals(expected, check().getUntracked());
+		git.status().call();
+		reply();
+		assertEquals(expected, check().getUntracked());
 	}
 
 	private void nativeOracle(java.util.Set<String> added,

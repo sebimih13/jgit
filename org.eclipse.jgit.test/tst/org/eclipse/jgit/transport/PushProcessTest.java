@@ -284,7 +284,7 @@ public class PushProcessTest extends SampleDataRepositoryTestCase {
 			out.flush();
 			String result = new String(bytes.toString(StandardCharsets.UTF_8));
 			assertEquals(
-					"null 0000000000000000000000000000000000000000 "
+					"(delete) 0000000000000000000000000000000000000000 "
 							+ "refs/heads/master 2c349335b7f797072cf729c4f3bb0914ecb6dec9\n",
 					result);
 		}
