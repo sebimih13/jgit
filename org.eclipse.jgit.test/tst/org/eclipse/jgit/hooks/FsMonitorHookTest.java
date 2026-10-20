@@ -41,14 +41,17 @@ public class FsMonitorHookTest extends RepositoryTestCase {
 	}
 
 	@Test
-	public void configuredExecutableReceivesLiteralTokenAndReturnsBinaryReply() throws Exception {
+	public void configuredExecutableReceivesLiteralTokenAndReturnsBinaryReply()
+			throws Exception {
 		Path script = executable("test \"$1\" = 2 || exit 7\n"
 				+ "printf '%s\\0path with space\\0' \"$2\"\n");
 		String token = "$literal; `opaque`";
 		FsMonitorHook hook = Hooks.fsMonitor(db, script.toFile(), token);
 		assertTrue(hook.isNativeHookPresent());
-		assertFalse(Files.exists(db.getDirectory().toPath().resolve("hooks/fsmonitor-watchman")));
-		assertArrayEquals((token + "\0path with space\0").getBytes(UTF_8), hook.call());
+		assertFalse(Files.exists(db.getDirectory().toPath()
+				.resolve("hooks/fsmonitor-watchman")));
+		assertArrayEquals((token + "\0path with space\0").getBytes(UTF_8),
+				hook.call());
 	}
 
 	@Test

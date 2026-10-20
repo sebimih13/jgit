@@ -1121,6 +1121,10 @@ public class PushCommandTest extends RepositoryTestCase {
 		// create other repository
 		Repository db2 = createWorkRepository();
 		addRepoToClose(db2);
+		// This pack-negotiation fixture pushes into its checked-out branch.
+		// Permit the ref-only update explicitly, as native Git requires.
+		db2.getConfig().setString("receive", null, "denyCurrentBranch", "ignore");
+		db2.getConfig().save();
 
 		// setup the first repository
 		final StoredConfig config = db.getConfig();

@@ -42,12 +42,21 @@ public class TypedGitHookTest extends RepositoryTestCase {
 	public static Collection<Object[]> hooks() {
 		return Arrays.asList(new Object[][] {
 				{ "pre-auto-gc", "0\n", "", true },
-				{ "pre-receive", "0\n", OLD + " " + ObjectId.zeroId().name() + " refs/heads/topic\n", true },
-				{ "update", "3\nrefs/heads/topic\n" + OLD + "\n" + ObjectId.zeroId().name() + "\n", "", true },
-				{ "post-receive", "0\n", OLD + " " + ObjectId.zeroId().name() + " refs/heads/topic\n", false },
+				{ "push-to-checkout", "1\n" + OLD + "\n", "", true },
+				{ "pre-receive", "0\n",
+						OLD + " " + ObjectId.zeroId().name()
+								+ " refs/heads/topic\n",
+						true },
+				{ "update",
+						"3\nrefs/heads/topic\n" + OLD + "\n"
+								+ ObjectId.zeroId().name() + "\n",
+						"", true },
+				{ "post-receive", "0\n",
+						OLD + " " + ObjectId.zeroId().name()
+								+ " refs/heads/topic\n",
+						false },
 				{ "post-update", "1\nrefs/heads/topic\n", "", false },
-				{ "post-index-change", "2\n1\n0\n", "", false }
-		});
+				{ "post-index-change", "2\n1\n0\n", "", false } });
 	}
 
 	private final String name;
@@ -62,7 +71,8 @@ public class TypedGitHookTest extends RepositoryTestCase {
 
 	private final ByteArrayOutputStream errors = new ByteArrayOutputStream();
 
-	public TypedGitHookTest(String name, String arguments, String input, boolean verification) {
+	public TypedGitHookTest(String name, String arguments, String input,
+			boolean verification) {
 		this.name = name;
 		this.arguments = arguments;
 		this.input = input;
@@ -78,6 +88,9 @@ public class TypedGitHookTest extends RepositoryTestCase {
 		ReceiveCommand command = new ReceiveCommand(ObjectId.fromString(OLD),
 				ObjectId.zeroId(), "refs/heads/topic");
 		switch (name) {
+		case "push-to-checkout":
+			return Hooks.pushToCheckout(db, ObjectId.fromString(OLD), output,
+					errors);
 		case "pre-auto-gc":
 			return Hooks.preAutoGc(db, output, errors);
 		case "pre-receive":
@@ -100,16 +113,16 @@ public class TypedGitHookTest extends RepositoryTestCase {
 		Files.createDirectories(script.getParent());
 		Files.writeString(script, "#!/bin/sh\n"
 				+ "printf '%s\\n' \"$#\" \"$@\" >\"$GIT_DIR/typed.args\"\n"
-				+ "cat >\"$GIT_DIR/typed.stdin\"\n"
-				+ "printf hook-output\n"
-				+ "printf hook-error >&2\n"
-				+ "exit " + code + "\n");
+				+ "cat >\"$GIT_DIR/typed.stdin\"\n" + "printf hook-output\n"
+				+ "printf hook-error >&2\n" + "exit " + code + "\n");
 		FS.DETECTED.setExecute(script.toFile(), true);
 	}
 
 	private void assertInvocation() throws Exception {
-		assertEquals(arguments, Files.readString(db.getDirectory().toPath().resolve("typed.args")));
-		assertEquals(input, Files.readString(db.getDirectory().toPath().resolve("typed.stdin")));
+		assertEquals(arguments, Files
+				.readString(db.getDirectory().toPath().resolve("typed.args")));
+		assertEquals(input, Files
+				.readString(db.getDirectory().toPath().resolve("typed.stdin")));
 		assertEquals("hook-output", output.toString(UTF_8));
 		assertEquals("hook-error", errors.toString(UTF_8));
 	}

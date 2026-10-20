@@ -41,8 +41,9 @@ public class PostReceiveHook extends GitHook<Void> {
 	 * @param error
 	 *            hook errors, or null for System.err
 	 */
-	protected PostReceiveHook(Repository repo, Collection<ReceiveCommand> commands,
-			OutputStream output, OutputStream error) {
+	protected PostReceiveHook(Repository repo,
+			Collection<ReceiveCommand> commands, OutputStream output,
+			OutputStream error) {
 		super(repo, output == null ? System.err : output, error);
 		input = Hooks.receiveHookInput(commands);
 	}

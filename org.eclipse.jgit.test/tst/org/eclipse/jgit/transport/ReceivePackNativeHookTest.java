@@ -304,6 +304,19 @@ public class ReceivePackNativeHookTest extends RepositoryTestCase {
 		assertEquals(1, javaPostUpdates);
 	}
 
+
+	@Test
+	public void hookCopyThreadsCanFinishBeforeFurtherProtocolWrites() throws Exception {
+		hook("pre-receive", "cat >/dev/null\necho STDOUT pre-receive\necho STDERR pre-receive >&2\n");
+		for (int i = 0; i < 20; i++) {
+			String ref = "refs/heads/output-" + i;
+			PushResult result = push(ref, first, null, null);
+			assertEquals(RemoteRefUpdate.Status.OK, result.getRemoteUpdate(ref).getStatus());
+			assertTrue(result.getMessages().contains("STDOUT pre-receive"));
+			assertTrue(result.getMessages().contains("STDERR pre-receive"));
+		}
+	}
+
 	@Test
 	public void configuredReceiveHookRuns() throws Exception {
 		Path path = hook("notification",

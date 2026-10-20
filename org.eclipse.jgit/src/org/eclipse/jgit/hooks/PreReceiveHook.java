@@ -40,8 +40,9 @@ public class PreReceiveHook extends GitHook<Void> {
 	 * @param error
 	 *            hook errors, or null for System.err
 	 */
-	protected PreReceiveHook(Repository repo, Collection<ReceiveCommand> commands,
-			OutputStream output, OutputStream error) {
+	protected PreReceiveHook(Repository repo,
+			Collection<ReceiveCommand> commands, OutputStream output,
+			OutputStream error) {
 		super(repo, output, error);
 		input = Hooks.receiveHookInput(commands);
 	}

@@ -14,6 +14,7 @@ import java.io.OutputStream;
 import java.io.PrintStream;
 import java.util.Collection;
 
+import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.transport.ReceiveCommand;
@@ -25,6 +26,20 @@ import org.eclipse.jgit.util.LfsFactory;
  * @since 4.0
  */
 public class Hooks {
+
+	/**
+	 * Create a push-to-checkout deployment hook.
+	 * @param repo repository owning the worktree being updated
+	 * @param commit proposed commit
+	 * @param output hook stdout, or null for System.err
+	 * @param error hook stderr, or null for System.err
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static PushToCheckoutHook pushToCheckout(Repository repo,
+			AnyObjectId commit, OutputStream output, OutputStream error) {
+		return new PushToCheckoutHook(repo, commit, output, error);
+	}
 
 	/**
 	 * Create a binary FSMonitor v2 query of the configured executable.

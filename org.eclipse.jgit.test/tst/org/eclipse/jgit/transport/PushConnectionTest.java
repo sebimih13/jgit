@@ -213,7 +213,7 @@ public class PushConnectionTest {
 				connection.push(NullProgressMonitor.INSTANCE, updates);
 				fail("server did not abort");
 			} catch (Exception e) {
-				assertTrue(e instanceof TooLargePackException);
+				assertTrue(e.toString(), e instanceof TooLargePackException);
 			}
 		}
 	}

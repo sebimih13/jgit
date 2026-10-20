@@ -43,8 +43,9 @@ public class PostIndexChangeHook extends GitHook<Void> {
 	 * @param error
 	 *            hook errors, or null for System.err
 	 */
-	protected PostIndexChangeHook(Repository repo, boolean updatedWorkTree, boolean updatedSkipWorkTree,
-			OutputStream output, OutputStream error) {
+	protected PostIndexChangeHook(Repository repo, boolean updatedWorkTree,
+			boolean updatedSkipWorkTree, OutputStream output,
+			OutputStream error) {
 		super(repo, output == null ? System.err : output, error);
 		if (updatedWorkTree && updatedSkipWorkTree) {
 			throw new IllegalArgumentException();

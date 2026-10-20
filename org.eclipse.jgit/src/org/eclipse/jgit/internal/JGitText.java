@@ -30,6 +30,13 @@ public class JGitText extends TranslationBundle {
 	}
 
 	// @formatter:off
+	/***/ public String pushToCheckoutHookDeclined;
+	/***/ public String pushToCheckoutFailed;
+	/***/ public String pushToCheckoutUnstagedChanges;
+	/***/ public String pushToCheckoutStagedChanges;
+	/***/ public String deleteCurrentBranchProhibited;
+	/***/ public String updatingCurrentBranchWarning;
+	/***/ public String deletingCurrentBranchWarning;
 	/***/ public String preReceiveHookDeclined;
 	/***/ public String updateHookDeclined;
 	/***/ public String abbreviationLengthMustBeNonNegative;

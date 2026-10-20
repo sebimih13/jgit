@@ -17,6 +17,7 @@ import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.Trace2;
 
 /**
@@ -43,9 +44,13 @@ public class FsMonitorHook extends GitHook<byte[]> {
 
 	/**
 	 * Create a binary FSMonitor query.
-	 * @param repo repository
-	 * @param executable configured executable
-	 * @param token previous provider token
+	 *
+	 * @param repo
+	 *            repository
+	 * @param executable
+	 *            configured executable
+	 * @param token
+	 *            previous provider token
 	 */
 	protected FsMonitorHook(Repository repo, File executable, String token) {
 		super(repo, null, null);
@@ -65,7 +70,9 @@ public class FsMonitorHook extends GitHook<byte[]> {
 
 	@Override
 	public boolean isNativeHookPresent() {
-		return hook.isFile() && getRepository().getFS().canExecute(hook);
+		FS fs = getRepository().getFS();
+		return hook.isFile()
+				&& (fs == null ? FS.DETECTED : fs).canExecute(hook);
 	}
 
 	@Override

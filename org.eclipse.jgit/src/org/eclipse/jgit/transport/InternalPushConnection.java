@@ -10,10 +10,15 @@
 
 package org.eclipse.jgit.transport;
 
+import java.io.Closeable;
 import java.io.IOException;
-import java.io.PipedInputStream;
-import java.io.PipedOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
+import java.nio.channels.Channels;
+import java.nio.channels.Pipe;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.eclipse.jgit.errors.TransportException;
 import org.eclipse.jgit.internal.JGitText;
@@ -45,18 +50,34 @@ class InternalPushConnection<C> extends BasePackPushConnection {
 			final C req, final Repository remote) throws TransportException {
 		super(transport);
 
-		final PipedInputStream in_r;
-		final PipedOutputStream in_w;
+		final InputStream in_r;
+		final OutputStream in_w;
 
-		final PipedInputStream out_r;
-		final PipedOutputStream out_w;
+		final InputStream out_r;
+		final OutputStream out_w;
+		List<Closeable> opened = new ArrayList<>(4);
 		try {
-			in_r = new PipedInputStream();
-			in_w = new PipedOutputStream(in_r);
-
-			out_r = new PipedInputStream();
-			out_w = new PipedOutputStream(out_r);
+			// Hook output is copied by short-lived threads. Java's piped
+			// streams mistake their exit for the end of the server writer.
+			// Channel pipes remain readable until the endpoint is closed.
+			Pipe incoming = Pipe.open();
+			opened.add(incoming.source());
+			opened.add(incoming.sink());
+			Pipe outgoing = Pipe.open();
+			opened.add(outgoing.source());
+			opened.add(outgoing.sink());
+			in_r = Channels.newInputStream(incoming.source());
+			in_w = Channels.newOutputStream(incoming.sink());
+			out_r = Channels.newInputStream(outgoing.source());
+			out_w = Channels.newOutputStream(outgoing.sink());
 		} catch (IOException err) {
+			for (Closeable channel : opened) {
+				try {
+					channel.close();
+				} catch (IOException closeError) {
+					err.addSuppressed(closeError);
+				}
+			}
 			remote.close();
 			throw new TransportException(uri, JGitText.get().cannotConnectPipes, err);
 		}

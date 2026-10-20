@@ -34,8 +34,8 @@ public class PreAutoGcHook extends GitHook<Void> {
 	 * @param error
 	 *            hook errors, or null for System.err
 	 */
-	protected PreAutoGcHook(Repository repo,
-			OutputStream output, OutputStream error) {
+	protected PreAutoGcHook(Repository repo, OutputStream output,
+			OutputStream error) {
 		super(repo, output, error);
 	}
 

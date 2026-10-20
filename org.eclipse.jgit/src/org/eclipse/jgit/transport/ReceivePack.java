@@ -29,6 +29,7 @@ import static org.eclipse.jgit.transport.SideBandOutputStream.CH_PROGRESS;
 import static org.eclipse.jgit.transport.SideBandOutputStream.MAX_BUF;
 
 import java.io.EOFException;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -51,6 +52,9 @@ import java.util.stream.Collectors;
 import org.eclipse.jgit.annotations.Nullable;
 import org.eclipse.jgit.api.errors.AbortedByHookException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
+import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheCheckout;
+import org.eclipse.jgit.errors.IndexWriteException;
 import org.eclipse.jgit.errors.InvalidObjectIdException;
 import org.eclipse.jgit.errors.LargeObjectException;
 import org.eclipse.jgit.errors.PackProtocolException;
@@ -58,6 +62,7 @@ import org.eclipse.jgit.errors.TooLargePackException;
 import org.eclipse.jgit.errors.UnpackException;
 import org.eclipse.jgit.hooks.GitHook;
 import org.eclipse.jgit.hooks.Hooks;
+import org.eclipse.jgit.hooks.PushToCheckoutHook;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.submodule.SubmoduleValidator;
 import org.eclipse.jgit.internal.submodule.SubmoduleValidator.SubmoduleValidationException;
@@ -70,6 +75,7 @@ import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.GitmoduleEntry;
 import org.eclipse.jgit.lib.HookConfig;
+import org.eclipse.jgit.lib.IndexDiff;
 import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ObjectChecker;
 import org.eclipse.jgit.lib.ObjectDatabase;
@@ -83,10 +89,13 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.storage.file.FileRepositoryBuilder;
+import org.eclipse.jgit.submodule.SubmoduleWalk.IgnoreSubmoduleMode;
 import org.eclipse.jgit.transport.ConnectivityChecker.ConnectivityCheckInfo;
 import org.eclipse.jgit.transport.PacketLineIn.InputOverLimitIOException;
 import org.eclipse.jgit.transport.ReceiveCommand.Result;
 import org.eclipse.jgit.transport.RefAdvertiser.PacketLineOutRefAdvertiser;
+import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.util.io.InterruptTimer;
 import org.eclipse.jgit.util.io.LimitedInputStream;
 import org.eclipse.jgit.util.io.TimeoutInputStream;
@@ -257,6 +266,10 @@ public class ReceivePack {
 	/** Hook to validate the update commands before execution. */
 	private PreReceiveHook preReceive;
 
+	private final CurrentBranchPolicy currentBranchPolicy;
+
+	private final CurrentBranchPolicy deleteCurrentBranchPolicy;
+
 	private ReceiveCommandErrorHandler receiveCommandErrorHandler = new ReceiveCommandErrorHandler() {
 		// Use the default implementation.
 	};
@@ -289,6 +302,10 @@ public class ReceivePack {
 		allowReceiveClientSID = tc.isAllowReceiveClientSID();
 
 		ReceiveConfig rc = db.getConfig().get(ReceiveConfig::new);
+		currentBranchPolicy = CurrentBranchPolicy.parse(db.getConfig(),
+				"denyCurrentBranch"); //$NON-NLS-1$
+		deleteCurrentBranchPolicy = CurrentBranchPolicy.parse(db.getConfig(),
+				"denyDeleteCurrent"); //$NON-NLS-1$
 		allowCreates = rc.allowCreates;
 		allowAnyDeletes = true;
 		allowBranchDeletes = rc.allowDeletes;
@@ -304,6 +321,35 @@ public class ReceivePack {
 		signedPushConfig = rc.signedPush;
 		preReceive = PreReceiveHook.NULL;
 		postReceive = PostReceiveHook.NULL;
+	}
+
+	/** Policy for updates to a checked-out branch. */
+	private enum CurrentBranchPolicy {
+		IGNORE, WARN, REFUSE, UPDATE_INSTEAD;
+
+		static CurrentBranchPolicy parse(Config config, String key) {
+			String value = config.getString("receive", null, key); //$NON-NLS-1$
+			if (value == null) {
+				return REFUSE;
+			}
+			if (value.isEmpty()) {
+				return IGNORE;
+			}
+			if ("updateInstead".equalsIgnoreCase(value)) { //$NON-NLS-1$
+				return UPDATE_INSTEAD;
+			}
+			if ("ignore".equalsIgnoreCase(value)) { //$NON-NLS-1$
+				return IGNORE;
+			}
+			if ("warn".equalsIgnoreCase(value)) { //$NON-NLS-1$
+				return WARN;
+			}
+			if ("refuse".equalsIgnoreCase(value)) { //$NON-NLS-1$
+				return REFUSE;
+			}
+			return config.getBoolean("receive", null, key, true) ? REFUSE //$NON-NLS-1$
+					: IGNORE;
+		}
 	}
 
 	/** Configuration for receive operations. */
@@ -1855,7 +1901,7 @@ public class ReceivePack {
 		if (toApply.isEmpty())
 			return;
 
-		if (!hasReceiveHook("update")) { //$NON-NLS-1$
+		if (!hasReceiveHook("update") && !needsWorkTreeChecks(toApply)) { //$NON-NLS-1$
 			// Retain the existing batch path when no update hook is installed.
 			executeBatch(toApply);
 			return;
@@ -1890,11 +1936,158 @@ public class ReceivePack {
 
 	private void runUpdateHooks(List<ReceiveCommand> toApply) {
 		for (ReceiveCommand command : toApply) {
-			if (runReceiveHook(Hooks.update(db, command, msgOutWrapper,
-					msgOutWrapper))) {
-				command.setResult(Result.REJECTED_OTHER_REASON,
-						JGitText.get().updateHookDeclined);
+			try (Repository workTree = findWorkTree(command.getRefName())) {
+				if (!allowCurrentBranchUpdate(command, workTree)) {
+					continue;
+				}
+				if (runReceiveHook(Hooks.update(db, command, msgOutWrapper,
+						msgOutWrapper))) {
+					command.setResult(Result.REJECTED_OTHER_REASON,
+							JGitText.get().updateHookDeclined);
+					continue;
+				}
+				if (workTree != null
+						&& currentBranchPolicy == CurrentBranchPolicy.UPDATE_INSTEAD) {
+					if (hasReceiveHook(workTree, PushToCheckoutHook.NAME)) {
+						if (runReceiveHook(Hooks.pushToCheckout(workTree,
+								command.getNewId(), msgOutWrapper, msgOutWrapper))) {
+							command.setResult(Result.REJECTED_OTHER_REASON,
+									JGitText.get().pushToCheckoutHookDeclined);
+						}
+					} else {
+						deployWorkTree(command, workTree);
+					}
+				}
+			} catch (IOException e) {
+				command.setResult(Result.REJECTED_OTHER_REASON, e.getMessage());
 			}
+		}
+	}
+
+	private boolean needsWorkTreeChecks(List<ReceiveCommand> updates) {
+		if (db.getDirectory() == null) {
+			return false;
+		}
+		if (!db.isBare()
+				|| new File(db.getCommonDirectory(), "worktrees").isDirectory()) { //$NON-NLS-1$
+			return true;
+		}
+		try {
+			String head = db.getFullBranch();
+			return updates.stream().anyMatch(c -> c.getType() == ReceiveCommand.Type.DELETE
+					&& c.getRefName().equals(head));
+		} catch (IOException e) {
+			throw new JGitInternalException(e.getMessage(), e);
+		}
+	}
+
+	private Repository findWorkTree(String branch) throws IOException {
+		if (db.getDirectory() == null) {
+			return null;
+		}
+		if (!db.isBare() && branch.equals(db.getFullBranch())) {
+			db.incrementOpen();
+			return db;
+		}
+		File common = db.getCommonDirectory();
+		if (!common.equals(db.getDirectory())) {
+			Repository main = openCheckedOutWorkTree(common, branch);
+			if (main != null) {
+				return main;
+			}
+		}
+		File[] directories = new File(common, "worktrees").listFiles(); //$NON-NLS-1$
+		if (directories != null) {
+			for (File directory : directories) {
+				if (!new File(directory, "gitdir").isFile()) { //$NON-NLS-1$
+					continue;
+				}
+				Repository linked = openCheckedOutWorkTree(directory, branch);
+				if (linked != null) {
+					return linked;
+				}
+			}
+		}
+		return null;
+	}
+
+	private Repository openCheckedOutWorkTree(File directory, String branch)
+			throws IOException {
+		Repository candidate = new FileRepositoryBuilder().setFS(db.getFS())
+				.setGitDir(directory).build();
+		boolean retain = false;
+		try {
+			retain = !candidate.isBare() && branch.equals(candidate.getFullBranch());
+			return retain ? candidate : null;
+		} finally {
+			if (!retain) {
+				candidate.close();
+			}
+		}
+	}
+
+	private boolean allowCurrentBranchUpdate(ReceiveCommand command,
+			Repository workTree) throws IOException {
+		if (workTree != null) {
+			if (currentBranchPolicy == CurrentBranchPolicy.REFUSE) {
+				command.setResult(Result.REJECTED_CURRENT_BRANCH);
+				return false;
+			}
+			if (currentBranchPolicy == CurrentBranchPolicy.WARN) {
+				sendMessage(JGitText.get().updatingCurrentBranchWarning);
+			}
+		}
+		if (command.getType() == ReceiveCommand.Type.DELETE
+				&& (workTree != null || command.getRefName().equals(db.getFullBranch()))) {
+			if (deleteCurrentBranchPolicy == CurrentBranchPolicy.REFUSE
+					|| deleteCurrentBranchPolicy == CurrentBranchPolicy.UPDATE_INSTEAD) {
+				command.setResult(Result.REJECTED_OTHER_REASON,
+						JGitText.get().deleteCurrentBranchProhibited);
+				return false;
+			}
+			if (deleteCurrentBranchPolicy == CurrentBranchPolicy.WARN) {
+				sendMessage(JGitText.get().deletingCurrentBranchWarning);
+			}
+		}
+		return true;
+	}
+
+	private void deployWorkTree(ReceiveCommand command, Repository workTree)
+			throws IOException {
+		if (!workTree.getWorkTree().isDirectory()) {
+			command.setResult(Result.REJECTED_OTHER_REASON,
+					JGitText.get().pushToCheckoutFailed);
+			return;
+		}
+		DirCache index = workTree.lockDirCache();
+		try {
+			IndexDiff diff = new IndexDiff(workTree, HEAD,
+					new FileTreeIterator(workTree));
+			diff.setIgnoreSubmoduleMode(IgnoreSubmoduleMode.ALL);
+			diff.diff();
+			if (!diff.getModified().isEmpty() || !diff.getMissing().isEmpty()
+					|| !diff.getConflicting().isEmpty()) {
+				command.setResult(Result.REJECTED_OTHER_REASON,
+						JGitText.get().pushToCheckoutUnstagedChanges);
+				return;
+			}
+			if (!diff.getAdded().isEmpty() || !diff.getChanged().isEmpty()
+					|| !diff.getRemoved().isEmpty()) {
+				command.setResult(Result.REJECTED_OTHER_REASON,
+						JGitText.get().pushToCheckoutStagedChanges);
+				return;
+			}
+			try (RevWalk checkoutWalk = new RevWalk(workTree)) {
+				ObjectId oldTree = workTree.resolve(HEAD + "^{tree}"); //$NON-NLS-1$
+				DirCacheCheckout checkout = new DirCacheCheckout(workTree, oldTree,
+						index, checkoutWalk.parseTree(command.getNewId()));
+				checkout.setFailOnConflict(true);
+				if (!checkout.checkout()) {
+					throw new IndexWriteException();
+				}
+			}
+		} finally {
+			index.unlock();
 		}
 	}
 
@@ -1938,9 +2131,13 @@ public class ReceivePack {
 	}
 
 	private boolean hasReceiveHook(String name) {
-		return db.getDirectory() != null
-				&& (db.getFS().findHook(db, name) != null
-						|| db.getConfig().get(HookConfig.KEY).getCommands(name)
+		return hasReceiveHook(db, name);
+	}
+
+	private static boolean hasReceiveHook(Repository repository, String name) {
+		return repository.getDirectory() != null
+				&& (repository.getFS().findHook(repository, name) != null
+						|| repository.getConfig().get(HookConfig.KEY).getCommands(name)
 								.stream().anyMatch(HookConfig.Command::enabled));
 	}
 

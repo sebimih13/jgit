@@ -41,8 +41,9 @@ public class PostUpdateHook extends GitHook<Void> {
 	 * @param error
 	 *            hook errors, or null for System.err
 	 */
-	protected PostUpdateHook(Repository repo, Collection<ReceiveCommand> commands,
-			OutputStream output, OutputStream error) {
+	protected PostUpdateHook(Repository repo,
+			Collection<ReceiveCommand> commands, OutputStream output,
+			OutputStream error) {
 		super(repo, output == null ? System.err : output, error);
 		parameters = commands.stream().map(ReceiveCommand::getRefName)
 				.toArray(String[]::new);
