@@ -481,6 +481,7 @@ public class JGitText extends TranslationBundle {
 	/***/ public String invalidId;
 	/***/ public String invalidId0;
 	/***/ public String invalidIdLength;
+	/***/ public String invalidIndexVersion;
 	/***/ public String invalidIgnoreParamSubmodule;
 	/***/ public String invalidIgnoreRule;
 	/***/ public String invalidIntegerValue;

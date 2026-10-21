@@ -64,6 +64,8 @@ import org.eclipse.jgit.util.IO;
 import org.eclipse.jgit.util.MutableInteger;
 import org.eclipse.jgit.util.NB;
 import org.eclipse.jgit.util.TemporaryBuffer;
+import org.eclipse.jgit.util.SystemReader;
+import org.slf4j.LoggerFactory;
 import org.eclipse.jgit.util.io.SilentFileInputStream;
 
 /**
@@ -691,7 +693,8 @@ public class DirCache {
 		MessageDigest foot = newMessageDigest();
 		DigestOutputStream dos = new DigestOutputStream(os, foot);
 		if (version == null
-				|| version == DirCacheVersion.DIRC_VERSION_MINIMUM) {
+				|| version == DirCacheVersion.DIRC_VERSION_MINIMUM
+				|| version == DirCacheVersion.DIRC_VERSION_EXTENDED) {
 			version = DirCacheVersion.DIRC_VERSION_MINIMUM;
 			for (int i = 0; i < entryCnt; i++) {
 				if (sortedEntries[i].isExtended()) {
@@ -1215,10 +1218,52 @@ public class DirCache {
 
 		public DirCacheVersion getIndexVersion() {
 			// An existing index must not parse a default version it won't use.
-			return config.getEnum(ConfigConstants.CONFIG_INDEX_SECTION, null,
-					ConfigConstants.CONFIG_KEY_VERSION,
-					manyFiles ? DirCacheVersion.DIRC_VERSION_PATHCOMPRESS
-							: DirCacheVersion.DIRC_VERSION_EXTENDED);
+			String environment = SystemReader.getInstance().getenv("GIT_INDEX_VERSION"); //$NON-NLS-1$
+			if (environment != null) {
+				DirCacheVersion selected = parseEnvironmentVersion(environment);
+				if (selected != null)
+					return selected;
+				return invalidVersion("GIT_INDEX_VERSION"); //$NON-NLS-1$
+			}
+			int configured = config.getInt(ConfigConstants.CONFIG_INDEX_SECTION,
+					ConfigConstants.CONFIG_KEY_VERSION, manyFiles ? 4 : 3);
+			DirCacheVersion selected = DirCacheVersion.fromInt(configured);
+			return selected != null ? selected : invalidVersion("index.version"); //$NON-NLS-1$
+		}
+
+		private static DirCacheVersion parseEnvironmentVersion(String value) {
+			int pos = 0;
+			while (pos < value.length()) {
+				char c = value.charAt(pos);
+				if (c != ' ' && (c < '\t' || c > '\r'))
+					break;
+				pos++;
+			}
+			boolean negative = pos < value.length() && value.charAt(pos) == '-';
+			if (pos < value.length() && (negative || value.charAt(pos) == '+'))
+				pos++;
+			int digits = pos;
+			for (; pos < value.length(); pos++) {
+				char c = value.charAt(pos);
+				if (c < '0' || c > '9')
+					return null;
+			}
+			if (digits == pos)
+				return null;
+			try {
+				long parsed = Long.parseUnsignedLong(value.substring(digits));
+				// Native strtoul is assigned to an unsigned int before the
+				// range check. Preserve its low 32 bits, including a sign.
+				return DirCacheVersion.fromInt((int) (negative ? -parsed : parsed));
+			} catch (NumberFormatException invalid) {
+				return null;
+			}
+		}
+
+		private static DirCacheVersion invalidVersion(String setting) {
+			LoggerFactory.getLogger(DirCache.class).warn(MessageFormat.format(
+					JGitText.get().invalidIndexVersion, setting, Integer.valueOf(3)));
+			return DirCacheVersion.DIRC_VERSION_EXTENDED;
 		}
 
 		public boolean isSkipHash() {

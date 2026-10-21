@@ -251,6 +251,16 @@ public class UntrackedCacheTest extends RepositoryTestCase {
 	@Test
 	public void readsNativeGitPayloadAndNativeGitReadsJGitRewrite()
 			throws Exception {
+		checkNativePayloadRoundTrip("all");
+	}
+
+	@Test
+	public void nativeNormalModeDirectorySummariesSurviveJGitRewrite()
+			throws Exception {
+		checkNativePayloadRoundTrip("normal");
+	}
+
+	private void checkNativePayloadRoundTrip(String mode) throws Exception {
 		requireNativeGit();
 		writeTrashFile("tracked", "base");
 		try (Git git = new Git(db)) {
@@ -260,7 +270,7 @@ public class UntrackedCacheTest extends RepositoryTestCase {
 		writeTrashFile("sub/child", "new");
 		writeTrashFile(".gitignore", "ignored\n");
 		writeTrashFile("ignored", "hidden");
-		nativeGit("config", "status.showUntrackedFiles", "all");
+		nativeGit("config", "status.showUntrackedFiles", mode);
 		nativeGit("update-index", "--untracked-cache");
 		for (int i = 0; i < 130; i++) {
 			writeTrashFile("dir" + i + "/file", "new");
@@ -278,12 +288,30 @@ public class UntrackedCacheTest extends RepositoryTestCase {
 			assertEquals(Integer.parseInt(version), ByteBuffer.wrap(
 					Files.readAllBytes(db.getIndexFile().toPath())).getInt(4));
 			byte[] before = nativeGit("status", "--porcelain=v1", "-z",
-					"--untracked-files=all");
+					"--untracked-files=" + mode);
+			// t7063: an explicit mode different from the configured mode
+			// bypasses the cache without replacing its directory summaries.
+			byte[] populated = DirCache.read(db).getUntrackedCache().write();
+			nativeGit("status", "--porcelain=v1", "-z", "--untracked-files="
+					+ ("all".equals(mode) ? "normal" : "all"));
+			assertArrayEquals("Bypass must preserve the populated UNTR payload",
+					populated, DirCache.read(db).getUntrackedCache().write());
+			assertArrayEquals(before, nativeGit("status", "--porcelain=v1", "-z",
+					"--untracked-files=" + mode));
 			DirCache cache = db.lockDirCache();
 			try {
 				assertNotNull(cache.getUntrackedCache());
 				assertNotNull(cache.getUntrackedCache().root);
-				assertEquals(0, cache.getUntrackedCache().dirFlags);
+				assertEquals("all".equals(mode) ? 0 : 6, cache.getUntrackedCache().dirFlags);
+				Directory child = cache.getUntrackedCache().root.directories.stream()
+						.filter(d -> Arrays.equals(d.name, Constants.encode("sub")))
+						.findFirst().orElseThrow();
+				assertTrue(child.valid);
+				assertTrue(child.recurse);
+				assertEquals("normal".equals(mode), child.checkOnly);
+				assertEquals("normal".equals(mode),
+						cache.getUntrackedCache().root.untracked.stream()
+								.anyMatch(n -> Arrays.equals(n, Constants.encode("sub/"))));
 				byte[] originalIndex = Files.readAllBytes(db.getIndexFile().toPath());
 				int extension = -1;
 				for (int i = 12; i + 8 < originalIndex.length - 20; i++) {
@@ -304,7 +332,7 @@ public class UntrackedCacheTest extends RepositoryTestCase {
 			Files.deleteIfExists(nativeTrace);
 			try {
 				assertArrayEquals(before, nativeGit("status", "--porcelain=v1",
-						"-z", "--untracked-files=all"));
+						"-z", "--untracked-files=" + mode));
 				java.util.regex.Matcher opened = java.util.regex.Pattern
 						.compile(
 								"\"category\":\"read_directory\".*\"key\":\"opendir\".*\"value\":\"([0-9]+)\"")
@@ -480,12 +508,13 @@ public class UntrackedCacheTest extends RepositoryTestCase {
 
 	private byte[] nativeGit(String... arguments) throws Exception {
 		java.util.List<String> command = new java.util.ArrayList<>();
-		command.add("git");
+		command.add(System.getProperty("jgit.test.gitExecutable", "git"));
 		command.add("-c");
 		command.add("core.fsmonitor=false");
 		command.addAll(Arrays.asList(arguments));
 		ProcessBuilder builder = new ProcessBuilder(command);
 		builder.directory(db.getWorkTree());
+		builder.environment().keySet().removeIf(name -> name.startsWith("GIT_"));
 		builder.environment().put("GIT_CONFIG_NOSYSTEM", "1");
 		builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null");
 		if (nativeTrace != null) {

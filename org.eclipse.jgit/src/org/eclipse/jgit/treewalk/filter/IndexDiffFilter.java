@@ -121,11 +121,20 @@ public class IndexDiffFilter extends TreeFilter {
 		if (di != null) {
 			DirCacheEntry dce = di.getDirCacheEntry();
 			if (dce != null) {
-				if (dce.isAssumeValid())
-					return false;
 				// Never filter index entries with a stage different from 0
 				if (dce.getStage() != 0)
 					return true;
+				if (dce.isAssumeValid() || dce.isSkipWorkTree()) {
+					// These flags suppress worktree comparisons, but staged
+					// differences against any other tree remain visible.
+					for (int i = 0; i < cnt; i++) {
+						if (i != dirCache && i != workingTree
+								&& (tw.getRawMode(i) != dm
+										|| !tw.idEqual(i, dirCache)))
+							return true;
+					}
+					return false;
+				}
 			}
 		}
 

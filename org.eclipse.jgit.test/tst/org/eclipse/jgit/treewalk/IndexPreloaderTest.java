@@ -18,6 +18,7 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.nio.file.Files;
 import java.util.Map;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -130,6 +131,52 @@ public class IndexPreloaderTest extends RepositoryTestCase {
 		IndexPreloader result = IndexPreloader.load(db, fs, index, null);
 		assertNotNull(result);
 		assertNull(result.takeDirectory(new File(trash, "dir")));
+	}
+
+	@Test
+	public void nativeSkipWorktreeEntryIsNotPreloaded() throws Exception {
+		Assume.assumeTrue(db.getFS() instanceof FS_POSIX);
+		index(1000, true);
+		try (org.eclipse.jgit.api.Git git = org.eclipse.jgit.api.Git.wrap(db)) {
+			git.add().addFilepattern("dir").call();
+		}
+		var output = db.getDirectory().toPath().resolve("native-flag.out");
+		ProcessBuilder builder = new ProcessBuilder(List.of(
+				System.getProperty("jgit.test.gitExecutable", "git"),
+				"-c", "core.fsmonitor=false", "update-index", "--skip-worktree", "dir/f0000"))
+				.directory(db.getWorkTree()).redirectErrorStream(true).redirectOutput(output.toFile());
+		builder.environment().keySet().removeIf(n -> n.startsWith("GIT_"));
+		builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null");
+		builder.environment().put("GIT_CONFIG_NOSYSTEM", "1");
+		Process process = builder.start();
+		try {
+			assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+			assertEquals(Files.readString(output), 0, process.exitValue());
+		} finally {
+			if (process.isAlive()) {
+				process.destroyForcibly();
+				process.waitFor();
+			}
+		}
+		DirCache entries = db.readDirCache();
+		assertTrue(entries.getEntry("dir/f0000").isSkipWorkTree());
+		AtomicInteger leaves = new AtomicInteger();
+		FS_POSIX fs = new FS_POSIX() {
+			@Override
+			public Attributes getAttributes(File file) {
+				if (file.getName().equals("f0000"))
+					throw new AssertionError("Skipped entry must not be statted");
+				if (file.getName().startsWith("f"))
+					leaves.incrementAndGet();
+				return super.getAttributes(file);
+			}
+		};
+		IndexPreloader result = IndexPreloader.load(db, fs, entries, null);
+		assertNotNull(result);
+		assertEquals(999, leaves.get());
+		Map<String, FS.Attributes> directory = result.takeDirectory(new File(trash, "dir"));
+		assertEquals(999, directory.size());
+		assertNull(directory.get("f0000"));
 	}
 
 	@Test

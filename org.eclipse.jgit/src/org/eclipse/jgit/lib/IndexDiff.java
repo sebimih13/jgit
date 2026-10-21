@@ -47,7 +47,6 @@ import org.eclipse.jgit.treewalk.TreeWalk.OperationType;
 import org.eclipse.jgit.treewalk.WorkingTreeIterator;
 import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
 import org.eclipse.jgit.treewalk.filter.IndexDiffFilter;
-import org.eclipse.jgit.treewalk.filter.SkipWorkTreeFilter;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.eclipse.jgit.util.Trace2;
 
@@ -583,10 +582,10 @@ public class IndexDiff {
 
 			if (filter != null)
 				filters.add(filter);
-			filters.add(new SkipWorkTreeFilter(INDEX));
 			indexDiffFilter = new IndexDiffFilter(INDEX, WORKDIR);
 			filters.add(indexDiffFilter);
-			treeWalk.setFilter(AndTreeFilter.create(filters));
+			treeWalk.setFilter(filters.size() == 1 ? indexDiffFilter
+					: AndTreeFilter.create(filters));
 			fileModes.clear();
 			while (treeWalk.next()) {
 				AbstractTreeIterator treeIterator = treeWalk.getTree(TREE,
@@ -644,7 +643,12 @@ public class IndexDiff {
 					}
 				}
 
-				if (dirCacheIterator != null) {
+				DirCacheEntry entry = dirCacheIterator == null ? null
+						: dirCacheIterator.getDirCacheEntry();
+				// Flags suppress only worktree comparisons. Staged changes and
+				// the file-mode bookkeeping below still apply to these entries.
+				if (dirCacheIterator != null && (entry == null
+						|| !entry.isAssumeValid() && !entry.isSkipWorkTree())) {
 					if (workingTreeIterator == null) {
 						// in index, not in workdir => missing
 						boolean isGitLink = isEntryGitLink(dirCacheIterator);

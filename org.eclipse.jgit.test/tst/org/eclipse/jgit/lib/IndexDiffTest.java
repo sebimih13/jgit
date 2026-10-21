@@ -605,6 +605,24 @@ public class IndexDiffTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void stagedAssumeUnchangedEntryRetainsFileModeWhenAbsent() throws Exception {
+		try (Git git = Git.wrap(db)) {
+			writeTrashFile("file", "base");
+			git.add().addFilepattern("file").call();
+			git.commit().setMessage("base").call();
+			writeTrashFile("file", "staged");
+			git.add().addFilepattern("file").call();
+			assumeUnchanged("file");
+			deleteTrashFile("file");
+			IndexDiff diff = new IndexDiff(db, Constants.HEAD, new FileTreeIterator(db));
+			diff.diff();
+			assertEquals(Collections.singleton("file"), diff.getChanged());
+			assertTrue(diff.getMissing().isEmpty());
+			assertTrue(diff.getPathsWithIndexMode(FileMode.REGULAR_FILE).contains("file"));
+		}
+	}
+
+	@Test
 	public void testStageState() throws IOException {
 		final int base = DirCacheEntry.STAGE_1;
 		final int ours = DirCacheEntry.STAGE_2;

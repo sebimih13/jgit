@@ -32,19 +32,34 @@ import org.junit.runners.Parameterized;
 
 @RunWith(Parameterized.class)
 public class NativeCacheStatusTest extends RepositoryTestCase {
-	@Parameterized.Parameters(name = "untrackedCache={0}, preloadIndex={1}")
+	@Parameterized.Parameters(name = "manyFiles={0}, untrackedCache={1}, preloadIndex={2}")
 	public static List<Object[]> options() {
-		return List.of(new Object[] { false, false },
-				new Object[] { false, true }, new Object[] { true, false },
-				new Object[] { true, true });
+		return List.of(new Object[] { null, false, false },
+				new Object[] { null, false, true },
+				new Object[] { null, true, false },
+				new Object[] { null, true, true },
+				new Object[] { true, null, false },
+				new Object[] { true, null, true },
+				new Object[] { true, false, false },
+				new Object[] { true, false, true },
+				new Object[] { true, null, null },
+				new Object[] { false, null, null });
 	}
+
+	private final Boolean manyFiles;
+
+	private final Boolean configuredUntrackedCache;
 
 	private final boolean untrackedCache;
 
-	private final boolean preloadIndex;
+	private final Boolean preloadIndex;
 
-	public NativeCacheStatusTest(boolean untrackedCache, boolean preloadIndex) {
-		this.untrackedCache = untrackedCache;
+	public NativeCacheStatusTest(Boolean manyFiles,
+			Boolean untrackedCache, Boolean preloadIndex) {
+		this.manyFiles = manyFiles;
+		this.configuredUntrackedCache = untrackedCache;
+		this.untrackedCache = untrackedCache != null ? untrackedCache.booleanValue()
+				: Boolean.TRUE.equals(manyFiles);
 		this.preloadIndex = preloadIndex;
 	}
 
@@ -60,9 +75,9 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		super.setUp();
 		Assume.assumeTrue(FS.DETECTED instanceof FS_POSIX);
 		git = Git.wrap(db);
-		db.getConfig().setBoolean("core", null, "untrackedCache",
-				untrackedCache);
-		db.getConfig().setBoolean("core", null, "preloadIndex", preloadIndex);
+		setOption("feature", "manyFiles", manyFiles);
+		setOption("core", "untrackedCache", configuredUntrackedCache);
+		setOption("core", "preloadIndex", preloadIndex);
 		db.getConfig().setBoolean("jgit", null, "fsmonitorCache", true);
 		response = db.getDirectory().toPath().resolve("native-cache-response");
 		Path hook = db.getDirectory().toPath().resolve("hooks/fsmonitor-test");
@@ -71,7 +86,15 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 				"#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = 2 ] || exit 2\ncat .git/native-cache-response\n");
 		assertTrue(FS.DETECTED.setExecute(hook.toFile(), true));
 		db.getConfig().setString("core", null, "fsmonitor", hook.toString());
+		db.getConfig().save();
 		reply("/");
+	}
+
+	private void setOption(String section, String name, Boolean value) {
+		if (value == null)
+			db.getConfig().unset(section, null, name);
+		else
+			db.getConfig().setBoolean(section, null, name, value.booleanValue());
 	}
 
 	private void put(String path, String text) throws Exception {
@@ -453,6 +476,190 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		git.status().call();
 		reply();
 		assertEquals(expected, check().getUntracked());
+	}
+
+	// t7519: refresh_index() invalidates fsmonitor cache after moving HEAD back.
+	@Test
+	public void mixedResetInvalidatesWarmMonitorAndIndexState() throws Exception {
+		fsmonitorFixture();
+		var original = db.resolve("HEAD");
+		dirty();
+		git.add().addFilepattern(".").call();
+		git.commit().setMessage("to reset").call();
+		reply("/");
+		git.status().call();
+		reply();
+		git.status().call();
+		git.reset().setRef(original.name()).setMode(ResetCommand.ResetType.MIXED).call();
+		reply();
+		var status = check();
+		assertTrue(status.getAdded().isEmpty());
+		assertTrue(status.getChanged().isEmpty());
+		assertEquals(Set.of("modified", "dir1/modified", "dir2/modified"), status.getModified());
+		assertEquals(Set.of("new", "dir1/new", "dir2/new", "untracked",
+				"dir1/untracked", "dir2/untracked"), status.getUntracked());
+		assertEquals(original, db.resolve("HEAD"));
+	}
+
+	// t7063: empty repo (no index) and core.untrackedCache.
+	@Test
+	public void emptyRepositoryWithoutIndexRemainsUsableWithCaches() throws Exception {
+		assertTrue(!Files.exists(db.getIndexFile().toPath()));
+		var empty = check();
+		assertTrue(empty.getAdded().isEmpty());
+		assertTrue(empty.getUntracked().isEmpty());
+		put("loose", "untracked");
+		reply("loose");
+		assertEquals(Set.of("loose"), check().getUntracked());
+		assertTrue(!Files.exists(db.getIndexFile().toPath()));
+	}
+
+	// t7063 config transitions, extended through a warm monitor/cache instance.
+	@Test
+	public void explicitCacheDisableOverridesManyFilesAndRescansUntracked() throws Exception {
+		fsmonitorFixture();
+		git.status().call();
+		db.getConfig().setBoolean("feature", null, "manyFiles", true);
+		db.getConfig().setBoolean("core", null, "untrackedCache", false);
+		db.getConfig().save();
+		reply();
+		git.status().call();
+		put("loose", "untracked");
+		reply();
+		assertEquals(Set.of("loose"), check().getUntracked());
+		db.getConfig().unset("core", null, "untrackedCache");
+		db.getConfig().save();
+		reply();
+		assertEquals(Set.of("loose"), check().getUntracked());
+		Files.delete(db.getWorkTree().toPath().resolve("loose"));
+		reply("loose");
+		assertTrue(check().getUntracked().isEmpty());
+	}
+
+	// t7519's preload/cache matrix with enough entries to run JGit's workers.
+	@Test
+	public void parallelSizedIndexRetainsStagedAndUnstagedCategories() throws Exception {
+		for (int n = 0; n < 1000; n++)
+			put("large/f" + n, "base\n");
+		git.add().addFilepattern("large").call();
+		git.commit().setMessage("large index").call();
+		put("large/f0", "staged\n");
+		git.add().addFilepattern("large/f0").call();
+		reply("/");
+		git.status().call();
+		put("large/f0", "unstaged after staging\n");
+		Files.delete(db.getWorkTree().toPath().resolve("large/f1"));
+		put("large/loose\nname", "untracked");
+		reply("large/f0", "large/f1", "large/loose\nname");
+		var status = check();
+		assertEquals(Set.of("large/f0"), status.getChanged());
+		assertEquals(Set.of("large/f0"), status.getModified());
+		assertEquals(Set.of("large/f1"), status.getMissing());
+		assertEquals(Set.of("large/loose\nname"), status.getUntracked());
+		put("large/f0", "staged\n");
+		put("large/f1", "base\n");
+		reply("large/f0", "large/f1");
+		var restored = check();
+		assertEquals(Set.of("large/f0"), restored.getChanged());
+		assertTrue(restored.getModified().isEmpty());
+		assertTrue(restored.getMissing().isEmpty());
+	}
+
+	private void largeIndexFixture() throws Exception {
+		for (int n = 0; n < 1000; n++)
+			put("flags/f" + n, "base\n");
+		git.add().addFilepattern("flags").call();
+		git.commit().setMessage("index flag fixture").call();
+	}
+
+	// t4039: keep the indexed version visible while ignoring worktree content.
+	// The large fixture also exercises preload-index.c's entry eligibility.
+	@Test
+	public void assumedEntryRetainsStagedChangeAndFlagRemovalInvalidatesCache()
+			throws Exception {
+		largeIndexFixture();
+		put("flags/f0", "staged\n");
+		git.add().addFilepattern("flags/f0").call();
+		nativeIndexFlag("--assume-unchanged", "flags/f0");
+		assertTrue(db.readDirCache().getEntry("flags/f0").isAssumeValid());
+		put("flags/f0", "unreported worktree contents\n");
+		put("flags/f1", "ordinary tracked edit\n");
+		reply("flags/f0", "flags/f1");
+		var dirty = check();
+		assertEquals(Set.of("flags/f0"), dirty.getChanged());
+		assertEquals(Set.of("flags/f1"), dirty.getModified());
+		assertTrue(dirty.getMissing().isEmpty());
+		Files.delete(db.getWorkTree().toPath().resolve("flags/f0"));
+		reply("flags/f0");
+		var absent = check();
+		assertEquals(Set.of("flags/f0"), absent.getChanged());
+		assertEquals(Set.of("flags/f1"), absent.getModified());
+		assertTrue(absent.getMissing().isEmpty());
+		git.status().call();
+		nativeIndexFlag("--no-assume-unchanged", "flags/f0");
+		reply();
+		var restored = check();
+		assertEquals(Set.of("flags/f0"), restored.getChanged());
+		assertEquals(Set.of("flags/f1"), restored.getModified());
+		assertEquals(Set.of("flags/f0"), restored.getMissing());
+	}
+
+	// t7011: skip-worktree excludes both dirty and absent worktree entries.
+	@Test
+	public void skippedDirtyAndAbsentEntriesReappearAfterFlagRemoval()
+			throws Exception {
+		largeIndexFixture();
+		put("flags/new", "indexed addition\n");
+		git.add().addFilepattern("flags/new").call();
+		nativeIndexFlag("--skip-worktree", "flags/f0", "flags/f1", "flags/new");
+		put("flags/new", "skipped addition edit\n");
+		assertTrue(db.readDirCache().getEntry("flags/f0").isSkipWorkTree());
+		assertTrue(db.readDirCache().getEntry("flags/f1").isSkipWorkTree());
+		put("flags/f0", "skipped worktree edit\n");
+		Files.delete(db.getWorkTree().toPath().resolve("flags/f1"));
+		put("flags/f2", "ordinary tracked edit\n");
+		reply("flags/f0", "flags/f1", "flags/f2");
+		var skipped = check();
+		assertEquals(Set.of("flags/new"), skipped.getAdded());
+		assertTrue(skipped.getChanged().isEmpty());
+		assertEquals(Set.of("flags/f2"), skipped.getModified());
+		assertTrue(skipped.getMissing().isEmpty());
+		Files.delete(db.getWorkTree().toPath().resolve("flags/new"));
+		reply("flags/new");
+		var absentAddition = check();
+		assertEquals(Set.of("flags/new"), absentAddition.getAdded());
+		assertTrue(absentAddition.getMissing().isEmpty());
+		git.status().call();
+		nativeIndexFlag("--no-skip-worktree", "flags/f0", "flags/f1", "flags/new");
+		reply();
+		var restored = check();
+		assertEquals(Set.of("flags/f0", "flags/f2"), restored.getModified());
+		assertEquals(Set.of("flags/new"), restored.getAdded());
+		assertEquals(Set.of("flags/f1", "flags/new"), restored.getMissing());
+	}
+
+	private void nativeIndexFlag(String flag, String... paths) throws Exception {
+		var command = new java.util.ArrayList<>(List.of(
+				System.getProperty("jgit.test.gitExecutable", "git"),
+				"-c", "core.fsmonitor=false", "update-index", flag));
+		command.addAll(List.of(paths));
+		Path output = db.getDirectory().toPath().resolve("native-index.out");
+		ProcessBuilder builder = new ProcessBuilder(command).directory(db.getWorkTree())
+				.redirectErrorStream(true).redirectOutput(output.toFile());
+		builder.environment().keySet().removeIf(n -> n.startsWith("GIT_"));
+		builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null");
+		builder.environment().put("GIT_CONFIG_NOSYSTEM", "1");
+		Process process = builder.start();
+		try {
+			assertTrue("Native flag update timeout",
+					process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS));
+			assertEquals(Files.readString(output), 0, process.exitValue());
+		} finally {
+			if (process.isAlive()) {
+				process.destroyForcibly();
+				process.waitFor();
+			}
+		}
 	}
 
 	private void nativeOracle(java.util.Set<String> added,

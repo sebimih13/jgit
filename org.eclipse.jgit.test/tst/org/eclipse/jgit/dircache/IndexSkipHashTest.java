@@ -126,7 +126,7 @@ public class IndexSkipHashTest extends RepositoryTestCase {
 		configure(false, false);
 		add("3");
 		footer(db, false);
-		assertEquals(version, NB.decodeInt32(
+		assertEquals(version == 3 ? 2 : version, NB.decodeInt32(
 				Files.readAllBytes(db.getIndexFile().toPath()), 4));
 	}
 
@@ -138,7 +138,7 @@ public class IndexSkipHashTest extends RepositoryTestCase {
 		db.getConfig().setBoolean("index", null, "skipHash", true);
 		add("2");
 		footer(db, true);
-		assertEquals(version, NB.decodeInt32(
+		assertEquals(version == 3 ? 2 : version, NB.decodeInt32(
 				Files.readAllBytes(db.getIndexFile().toPath()), 4));
 	}
 
