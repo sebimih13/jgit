@@ -33,7 +33,7 @@ public class CommitTest extends CLIRepositoryTestCase {
 
 		result = toString(execute("git commit a -m 'added a'"));
 		assertEquals(
-				"[master 8cb3ef7e5171aaee1792df6302a5a0cd30425f7a] added a",
+				"[master f5cede08979d0df8a5bd6207b77cd56c408e7220] added a",
 				result);
 
 		result = toString(execute("git status -- a"));
@@ -57,7 +57,7 @@ public class CommitTest extends CLIRepositoryTestCase {
 
 		result = toString(execute("git commit -m 'added a b'"));
 		assertEquals(
-				"[master 3c93fa8e3a28ee26690498be78016edcb3a38c73] added a b",
+				"[master 1fd867bf4c6f544310dd77a777ae309bba7549c3] added a b",
 				result);
 
 		result = toString(execute("git status -- a b"));

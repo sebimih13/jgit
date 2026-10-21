@@ -41,6 +41,7 @@ import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.errors.MissingObjectException;
 import org.eclipse.jgit.errors.UnmergedPathException;
 import org.eclipse.jgit.hooks.CommitMsgHook;
+import org.eclipse.jgit.hooks.GitHook;
 import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.hooks.PostCommitHook;
 import org.eclipse.jgit.hooks.PostRewriteHook;
@@ -122,6 +123,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 * Setting this option bypasses the pre-commit and commit-msg hooks.
 	 */
 	private boolean noVerify;
+
+	private String hookPrefix = ""; //$NON-NLS-1$
 
 	private boolean automaticMerge;
 
@@ -205,10 +208,25 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						JGitText.get().cannotCommitOnARepoWithState,
 						state.name()));
 
+			if (committer == null) {
+				committer = new PersonIdent(repo);
+			}
+			if (author == null) {
+				if (amend) {
+					ObjectId original = repo
+							.resolve(Constants.HEAD + "^{commit}"); //$NON-NLS-1$
+					if (original != null) {
+						author = rw.parseCommit(original).getAuthorIdent();
+					}
+				} else {
+					author = committer;
+				}
+			}
+
 			if (!noVerify && !automaticMerge) {
-				Hooks.preCommit(repo, hookOutRedirect.get(PreCommitHook.NAME),
-						hookErrRedirect.get(PreCommitHook.NAME))
-						.call();
+				configureHook(Hooks.preCommit(repo,
+						hookOutRedirect.get(PreCommitHook.NAME),
+						hookErrRedirect.get(PreCommitHook.NAME))).call();
 			}
 
 			String messageSource;
@@ -266,27 +284,28 @@ public class CommitCommand extends GitCommand<RevCommit> {
 					// Validate the proposed tree before message hooks. Release
 					// the index lock so hooks can run index commands themselves.
 					indexTreeId = index.writeTree(odi);
-					checkIfEmpty(rw, headId, indexTreeId);
+					checkIfEmpty(rw, indexTreeId);
 				} finally {
 					index.unlock();
 				}
 
 				if (!noVerify && automaticMerge) {
-					Hooks.preMergeCommit(repo, null, null).call();
+					configureHook(Hooks.preMergeCommit(repo, null, null)).call();
 				}
 
-				message = Hooks.prepareCommitMsg(repo,
-						hookOutRedirect.get(PrepareCommitMsgHook.NAME),
-						hookErrRedirect.get(PrepareCommitMsgHook.NAME))
+				message = configureHook(Hooks
+						.prepareCommitMsg(repo,
+								hookOutRedirect.get(PrepareCommitMsgHook.NAME),
+								hookErrRedirect.get(PrepareCommitMsgHook.NAME))
 						.setMessageSource(messageSource, null)
-						.setCommitMessage(message).call();
+						.setCommitMessage(message)).call();
 
 				if (!noVerify) {
-					message = Hooks
+					message = configureHook(Hooks
 							.commitMsg(repo,
 									hookOutRedirect.get(CommitMsgHook.NAME),
 									hookErrRedirect.get(CommitMsgHook.NAME))
-							.setCommitMessage(message).call();
+							.setCommitMessage(message)).call();
 				}
 
 				CommitConfig config = null;
@@ -338,8 +357,9 @@ public class CommitCommand extends GitCommand<RevCommit> {
 				updateRef(state, headId, revCommit, commitId);
 			}
 			try {
-				Hooks.postCommit(repo, hookOutRedirect.get(PostCommitHook.NAME),
-						hookErrRedirect.get(PostCommitHook.NAME)).call();
+				configureHook(Hooks.postCommit(repo,
+						hookOutRedirect.get(PostCommitHook.NAME),
+						hookErrRedirect.get(PostCommitHook.NAME))).call();
 			} catch (Exception e) {
 				log.error(MessageFormat.format(
 						JGitText.get().postCommitHookFailed, e.getMessage()),
@@ -347,10 +367,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			}
 			if (amend && !noPostRewrite && headId != null) {
 				try {
-					Hooks.postRewrite(repo, "amend", //$NON-NLS-1$
+					configureHook(Hooks.postRewrite(repo, "amend", //$NON-NLS-1$
 							headId.name() + " " + revCommit.name() + "\n", //$NON-NLS-1$ //$NON-NLS-2$
 							hookOutRedirect.get(PostRewriteHook.NAME),
-							hookErrRedirect.get(PostRewriteHook.NAME)).call();
+							hookErrRedirect.get(PostRewriteHook.NAME))).call();
 				} catch (Exception e) {
 					log.error(MessageFormat.format(
 							JGitText.get().exceptionCaughtDuringExecutionOfHook,
@@ -366,15 +386,24 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		}
 	}
 
-	private void checkIfEmpty(RevWalk rw, ObjectId headId, ObjectId indexTreeId)
+	private <H extends GitHook<?>> H configureHook(H hook) {
+		hook.setAuthor(author);
+		hook.setPrefix(hookPrefix);
+		return hook;
+	}
+
+	private void checkIfEmpty(RevWalk rw, ObjectId indexTreeId)
 			throws EmptyCommitException, MissingObjectException,
 			IncorrectObjectTypeException, IOException {
-		if (headId != null && !allowEmpty.booleanValue()) {
-			RevCommit headCommit = rw.parseCommit(headId);
-			headCommit.getTree();
-			if (indexTreeId.equals(headCommit.getTree())) {
-				throw new EmptyCommitException(JGitText.get().emptyCommit);
-			}
+		if (allowEmpty.booleanValue() || parents.size() > 1) {
+			return;
+		}
+		ObjectId parentTree = Constants.EMPTY_TREE_ID;
+		if (!parents.isEmpty()) {
+			parentTree = rw.parseCommit(parents.get(0)).getTree();
+		}
+		if (indexTreeId.equals(parentTree)) {
+			throw new EmptyCommitException(JGitText.get().emptyCommit);
 		}
 	}
 
@@ -1018,6 +1047,20 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	public CommitCommand setReflogComment(String reflogComment) {
 		this.reflogComment = reflogComment;
 		useDefaultReflogMessage = false;
+		return this;
+	}
+
+	/**
+	 * Set the invocation directory reported to commit hooks as GIT_PREFIX.
+	 * This is context only; hooks continue to execute at the worktree root.
+	 * @param prefix repository-relative directory including a trailing slash;
+	 *            null or empty for a root invocation
+	 * @return this command
+	 * @since 7.8
+	 */
+	public CommitCommand setHookPrefix(String prefix) {
+		checkCallable();
+		hookPrefix = prefix == null ? "" : prefix; //$NON-NLS-1$
 		return this;
 	}
 

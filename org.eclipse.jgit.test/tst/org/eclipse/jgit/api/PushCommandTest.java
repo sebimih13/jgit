@@ -722,8 +722,10 @@ public class PushCommandTest extends RepositoryTestCase {
 			git.checkout().setName("branchtopush").setCreateBranch(true).call();
 
 			config = git.getRepository().getConfig();
-			// Don't set remote, it'll default to "origin". Configure a
-			// different branch name; should be ignored.
+			// Make the triangular fetch remote explicit: with only one
+			// configured remote native Git now discovers "test" instead.
+			config.setString("branch", "branchtopush", "remote", "origin");
+			// A different upstream branch name is ignored for triangular simple.
 			config.setString("branch", "branchtopush", "merge",
 					"refs/heads/upstreambranch");
 			config.save();
@@ -1045,6 +1047,9 @@ public class PushCommandTest extends RepositoryTestCase {
 			git.checkout().setName("branchtopush").setCreateBranch(true).call();
 
 			config = git.getRepository().getConfig();
+			// Explicitly configure the unknown origin. A sole configured
+			// remote is otherwise selected as in native Git.
+			config.setString("branch", "branchtopush", "remote", "origin");
 			config.setString("branch", "branchtopush", "merge",
 					"refs/heads/branchtopush");
 			config.save();

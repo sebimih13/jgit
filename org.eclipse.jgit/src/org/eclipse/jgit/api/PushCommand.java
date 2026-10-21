@@ -21,6 +21,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.eclipse.jgit.api.errors.DetachedHeadException;
 import org.eclipse.jgit.api.errors.GitAPIException;
@@ -40,6 +41,7 @@ import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.transport.PushConfig;
 import org.eclipse.jgit.transport.PushConfig.PushDefault;
 import org.eclipse.jgit.transport.PushResult;
@@ -58,10 +60,16 @@ import org.eclipse.jgit.util.Trace2;
  * @see <a href="http://www.kernel.org/pub/software/scm/git/docs/git-push.html"
  *      >Git documentation about Push</a>
  */
-public class PushCommand extends
-		TransportCommand<PushCommand, Iterable<PushResult>> {
+public class PushCommand
+		extends TransportCommand<PushCommand, Iterable<PushResult>> {
 
 	private String remote;
+
+	private String autoSetupBranch;
+
+	private String autoSetupDestination;
+
+	private AutoSetupRebase autoSetupRebase;
 
 	private final List<RefSpec> refSpecs;
 
@@ -74,9 +82,13 @@ public class PushCommand extends
 	private boolean dryRun;
 
 	private boolean noVerify;
+
 	private boolean atomic;
+
 	private boolean force;
+
 	private boolean thin = Transport.DEFAULT_PUSH_THIN;
+
 	private boolean useBitmaps = Transport.DEFAULT_PUSH_USE_BITMAPS;
 
 	private PrintStream hookOutRedirect;
@@ -114,11 +126,11 @@ public class PushCommand extends
 	 * call to {@link #call()})
 	 */
 	@Override
-	public Iterable<PushResult> call() throws GitAPIException,
-			InvalidRemoteException,
+	public Iterable<PushResult> call()
+			throws GitAPIException, InvalidRemoteException,
 			org.eclipse.jgit.api.errors.TransportException {
-		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
-				"push", "jgit.api.PushCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo, "push", //$NON-NLS-1$
+				"jgit.api.PushCommand")) { //$NON-NLS-1$
 			boolean returned = false;
 			try {
 				Iterable<PushResult> result = callWithTrace();
@@ -133,8 +145,8 @@ public class PushCommand extends
 		}
 	}
 
-	private Iterable<PushResult> callWithTrace() throws GitAPIException,
-			InvalidRemoteException,
+	private Iterable<PushResult> callWithTrace()
+			throws GitAPIException, InvalidRemoteException,
 			org.eclipse.jgit.api.errors.TransportException {
 		checkCallable();
 		setCallable(false);
@@ -145,8 +157,7 @@ public class PushCommand extends
 			Config config = repo.getConfig();
 			remote = determineRemote(config, remote);
 			if (refSpecs.isEmpty()) {
-				RemoteConfig rc = new RemoteConfig(config,
-						getRemote());
+				RemoteConfig rc = new RemoteConfig(config, getRemote());
 				refSpecs.addAll(rc.getPushRefSpecs());
 				if (refSpecs.isEmpty()) {
 					determineDefaultRefSpecs(config);
@@ -161,7 +172,7 @@ public class PushCommand extends
 			List<Transport> transports = Transport.openAll(repo, remote,
 					Transport.Operation.PUSH);
 			for (@SuppressWarnings("resource") // Explicitly closed in finally
-					final Transport transport : transports) {
+			final Transport transport : transports) {
 				transport.setPushThin(thin);
 				transport.setPushAtomic(atomic);
 				if (receivePack != null)
@@ -180,6 +191,7 @@ public class PushCommand extends
 				try {
 					PushResult result = transport.push(monitor, toPush, out);
 					pushResults.add(result);
+					configureAutomaticUpstream(result);
 
 				} catch (TooLargePackException e) {
 					throw new org.eclipse.jgit.api.errors.TooLargePackException(
@@ -238,7 +250,7 @@ public class PushCommand extends
 			}
 		}
 		if (effectiveRemote == null) {
-			effectiveRemote = Constants.DEFAULT_REMOTE_NAME;
+			effectiveRemote = defaultRemoteName(config);
 		}
 		return effectiveRemote;
 	}
@@ -252,63 +264,113 @@ public class PushCommand extends
 		throw new DetachedHeadException();
 	}
 
+	private static String defaultRemoteName(Config config) {
+		Set<String> remotes = config
+				.getSubsections(ConfigConstants.CONFIG_REMOTE_SECTION);
+		return remotes.size() == 1 ? remotes.iterator().next()
+				: Constants.DEFAULT_REMOTE_NAME;
+	}
+
 	private void determineDefaultRefSpecs(Config config)
 			throws IOException, GitAPIException {
 		if (pushDefault == null) {
 			pushDefault = config.get(PushConfig::new).getPushDefault();
 		}
 		switch (pushDefault) {
-		case CURRENT:
-			refSpecs.add(new RefSpec(getCurrentBranch()));
-			break;
 		case MATCHING:
 			refSpecs.add(new RefSpec(":")); //$NON-NLS-1$
-			break;
+			return;
 		case NOTHING:
 			throw new InvalidRefNameException(
 					JGitText.get().pushDefaultNothing);
+		default:
+			break;
+		}
+		String currentBranch = getCurrentBranch();
+		String shortBranch = Repository.shortenRefName(currentBranch);
+		BranchConfig branchCfg = new BranchConfig(config, shortBranch);
+		String[] upstreams = config.getStringList(
+				ConfigConstants.CONFIG_BRANCH_SECTION, shortBranch,
+				ConfigConstants.CONFIG_KEY_MERGE);
+		boolean autoSetup = upstreams.length == 0
+				&& config.getBoolean("push", null, "autoSetupRemote", false); //$NON-NLS-1$ //$NON-NLS-2$
+		String destination = currentBranch;
+		switch (pushDefault) {
+		case CURRENT:
+			break;
 		case SIMPLE:
 		case UPSTREAM:
-			String currentBranch = getCurrentBranch();
-			BranchConfig branchCfg = new BranchConfig(config,
-					Repository.shortenRefName(currentBranch));
 			String fetchRemote = branchCfg.getRemote();
 			if (fetchRemote == null) {
-				fetchRemote = Constants.DEFAULT_REMOTE_NAME;
+				fetchRemote = defaultRemoteName(config);
 			}
-			boolean isTriangular = !fetchRemote.equals(remote);
-			if (isTriangular) {
+			boolean triangular = !fetchRemote.equals(remote);
+			if (triangular) {
 				if (PushDefault.UPSTREAM.equals(pushDefault)) {
 					throw new InvalidRefNameException(MessageFormat.format(
 							JGitText.get().pushDefaultTriangularUpstream,
 							remote, fetchRemote));
 				}
-				// Strange, but consistent with C git: "simple" doesn't even
-				// check whether there is a configured upstream, and if so, that
-				// it is equal to the local branch name. It just becomes
-				// "current".
-				refSpecs.add(new RefSpec(currentBranch));
 			} else {
-				String trackedBranch = branchCfg.getMerge();
-				if (branchCfg.isRemoteLocal() || trackedBranch == null
-						|| !trackedBranch.startsWith(Constants.R_HEADS)) {
+				if (upstreams.length > 1) {
+					throw new InvalidRefNameException(MessageFormat.format(
+							JGitText.get().pushDefaultMultipleUpstreams,
+							currentBranch));
+				}
+				if (!autoSetup && (branchCfg.getRemote() == null
+						|| branchCfg.isRemoteLocal() || upstreams.length == 0
+						|| !upstreams[0].startsWith(Constants.R_HEADS))) {
 					throw new InvalidRefNameException(MessageFormat.format(
 							JGitText.get().pushDefaultNoUpstream,
 							currentBranch));
 				}
+				destination = autoSetup ? currentBranch : upstreams[0];
 				if (PushDefault.SIMPLE.equals(pushDefault)
-						&& !trackedBranch.equals(currentBranch)) {
+						&& !destination.equals(currentBranch)) {
 					throw new InvalidRefNameException(MessageFormat.format(
 							JGitText.get().pushDefaultSimple, currentBranch,
-							trackedBranch));
+							destination));
 				}
-				refSpecs.add(new RefSpec(currentBranch + ':' + trackedBranch));
 			}
 			break;
 		default:
 			throw new InvalidRefNameException(MessageFormat
 					.format(JGitText.get().pushDefaultUnknown, pushDefault));
 		}
+		refSpecs.add(new RefSpec(currentBranch + ':' + destination));
+		if (autoSetup) {
+			autoSetupRebase = config.getEnum(AutoSetupRebase.values(), "branch", //$NON-NLS-1$
+					null, "autoSetupRebase"); //$NON-NLS-1$
+			autoSetupBranch = shortBranch;
+			autoSetupDestination = destination;
+		}
+	}
+
+	private enum AutoSetupRebase {
+		NEVER, LOCAL, REMOTE, ALWAYS
+	}
+
+	private void configureAutomaticUpstream(PushResult result)
+			throws IOException {
+		if (dryRun || autoSetupBranch == null) {
+			return;
+		}
+		RemoteRefUpdate update = result.getRemoteUpdate(autoSetupDestination);
+		if (update == null || update.getStatus() != RemoteRefUpdate.Status.OK
+				&& update.getStatus() != RemoteRefUpdate.Status.UP_TO_DATE) {
+			return;
+		}
+		StoredConfig config = repo.getConfig();
+		config.setString(ConfigConstants.CONFIG_BRANCH_SECTION, autoSetupBranch,
+				ConfigConstants.CONFIG_KEY_REMOTE, remote);
+		config.setString(ConfigConstants.CONFIG_BRANCH_SECTION, autoSetupBranch,
+				ConfigConstants.CONFIG_KEY_MERGE, autoSetupDestination);
+		if (autoSetupRebase == AutoSetupRebase.REMOTE
+				|| autoSetupRebase == AutoSetupRebase.ALWAYS) {
+			config.setBoolean(ConfigConstants.CONFIG_BRANCH_SECTION,
+					autoSetupBranch, ConfigConstants.CONFIG_KEY_REBASE, true);
+		}
+		config.save();
 	}
 
 	/**
@@ -331,7 +393,8 @@ public class PushCommand extends
 	 * Bypass the local pre-push hook, like {@code git push --no-verify}.
 	 * Server-side verification is unaffected.
 	 *
-	 * @param noVerify whether to bypass the pre-push hook
+	 * @param noVerify
+	 *            whether to bypass the pre-push hook
 	 * @return this command
 	 * @since 7.8
 	 */
@@ -505,7 +568,8 @@ public class PushCommand extends
 	/**
 	 * The ref specs to be used in the push operation
 	 *
-	 * @param specs a {@link org.eclipse.jgit.transport.RefSpec} object.
+	 * @param specs
+	 *            a {@link org.eclipse.jgit.transport.RefSpec} object.
 	 * @return {@code this}
 	 */
 	public PushCommand setRefSpecs(RefSpec... specs) {
@@ -606,9 +670,8 @@ public class PushCommand extends
 			try {
 				src = repo.findRef(nameOrSpec);
 			} catch (IOException e) {
-				throw new JGitInternalException(
-						JGitText.get().exceptionCaughtDuringExecutionOfPushCommand,
-						e);
+				throw new JGitInternalException(JGitText
+						.get().exceptionCaughtDuringExecutionOfPushCommand, e);
 			}
 			if (src != null)
 				add(src);
@@ -628,7 +691,8 @@ public class PushCommand extends
 	/**
 	 * Sets whether the push operation should be a dry run
 	 *
-	 * @param dryRun a boolean.
+	 * @param dryRun
+	 *            a boolean.
 	 * @return {@code this}
 	 */
 	public PushCommand setDryRun(boolean dryRun) {

@@ -30,8 +30,8 @@ public class LogTest extends CLIRepositoryTestCase {
 	public void testLogCommitNewFile() throws Exception {
 		String result = toString(execute("git log"));
 		assertEquals(
-				toString("commit b4680f542095a8b41ea4258a5c03b548543a817c",
-						"Author: GIT_COMMITTER_NAME <GIT_COMMITTER_EMAIL>",
+				toString("commit a011a2746913097addc5dd48da2cbfc688d7f850",
+						"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 						"Date:   Sat Aug 15 20:12:58 2009 -0330", "added"),
 				result);
 	}
@@ -40,8 +40,8 @@ public class LogTest extends CLIRepositoryTestCase {
 	public void testLogNameOnly() throws Exception {
 		String result = toString(execute("git log --name-only"));
 		assertEquals(
-				toString("commit b4680f542095a8b41ea4258a5c03b548543a817c",
-						"Author: GIT_COMMITTER_NAME <GIT_COMMITTER_EMAIL>",
+				toString("commit a011a2746913097addc5dd48da2cbfc688d7f850",
+						"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 						"Date:   Sat Aug 15 20:12:58 2009 -0330", "added", "a",
 						"b"),
 				result);
@@ -50,8 +50,8 @@ public class LogTest extends CLIRepositoryTestCase {
 	@Test
 	public void testDiffCommitModifiedFileNameStatus() throws Exception {
 		String result = toString(execute("git log --name-status"));
-		assertEquals(toString("commit b4680f542095a8b41ea4258a5c03b548543a817c",
-				"Author: GIT_COMMITTER_NAME <GIT_COMMITTER_EMAIL>",
+		assertEquals(toString("commit a011a2746913097addc5dd48da2cbfc688d7f850",
+				"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 				"Date:   Sat Aug 15 20:12:58 2009 -0330", "added", "A\ta",
 				"A\tb"),
 				result);

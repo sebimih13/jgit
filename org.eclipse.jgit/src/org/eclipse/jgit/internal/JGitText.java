@@ -690,6 +690,7 @@ public class JGitText extends TranslationBundle {
 	/***/ public String pushCertificateInvalidHeader;
 	/***/ public String pushCertificateInvalidSignature;
 	/***/ public String pushCertificateInconsistentPushOptions;
+	/***/ public String pushDefaultMultipleUpstreams;
 	/***/ public String pushDefaultNothing;
 	/***/ public String pushDefaultNoUpstream;
 	/***/ public String pushDefaultSimple;
@@ -697,6 +698,7 @@ public class JGitText extends TranslationBundle {
 	/***/ public String pushDefaultUnknown;
 	/***/ public String pushIsNotSupportedForBundleTransport;
 	/***/ public String pushNotPermitted;
+	/***/ public String pushNoMatchingRefs;
 	/***/ public String pushOptionsNotSupported;
 	/***/ public String rawLogMessageDoesNotParseAsLogEntry;
 	/***/ public String readConfigFailed;

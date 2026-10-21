@@ -546,4 +546,28 @@ public abstract class PrePushHookTestCase extends RepositoryTestCase {
 		assertEquals(1000, server.getRefDatabase()
 				.getRefsByPrefix("refs/heads/b/").size());
 	}
+
+	/**
+	 * Verify a no-common-refs error is reported before local verification.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void matchingWithoutCommonRefsDoesNotRunPrePush() throws Exception {
+		db.getConfig().setString("push", null, "default", "matching");
+		db.getConfig().save();
+		installPrePush(7);
+		try {
+			push("parent1", List.of());
+			fail("Matching push without common refs must fail");
+		} catch (Exception expected) {
+			assertTrue(String.valueOf(expected.getMessage())
+					.contains("Perhaps you should specify a branch"));
+		}
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("pre-push.input")));
+		assertTrue(server.getRefDatabase().getRefs().isEmpty());
+	}
+
 }

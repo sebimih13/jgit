@@ -12,9 +12,12 @@ package org.eclipse.jgit.hooks;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.Callable;
 
 import org.eclipse.jgit.api.errors.AbortedByHookException;
+import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.ProcessResult;
@@ -38,6 +41,49 @@ import org.eclipse.jgit.util.io.TeeOutputStream;
 public abstract class GitHook<T> implements Callable<T> {
 
 	private final Repository repo;
+
+	private String prefix;
+
+	/**
+	 * Set the repository-relative invocation prefix exported to this hook.
+	 * Hooks still execute in the repository's usual hook working directory.
+	 * @param prefix invocation directory with trailing slash, or null for root
+	 * @return this hook
+	 * @since 7.8
+	 */
+	public GitHook<T> setPrefix(String prefix) {
+		this.prefix = prefix == null ? "" : prefix; //$NON-NLS-1$
+		return this;
+	}
+
+	private Map<String, String> environment = Map.of();
+
+	/**
+	 * Set the proposed commit author exported to this hook's child processes.
+	 *
+	 * @param author
+	 *            identity to export, or null to use the inherited environment
+	 * @return this hook
+	 * @since 7.8
+	 */
+	public GitHook<T> setAuthor(PersonIdent author) {
+		if (author == null) {
+			environment = Map.of();
+		} else {
+			StringBuilder name = new StringBuilder();
+			StringBuilder email = new StringBuilder();
+			StringBuilder zone = new StringBuilder();
+			PersonIdent.appendSanitized(name, author.getName());
+			PersonIdent.appendSanitized(email, author.getEmailAddress());
+			PersonIdent.appendTimezone(zone, author.getTimeZoneOffset());
+			environment = Map.of("GIT_AUTHOR_NAME", name.toString(), //$NON-NLS-1$
+					"GIT_AUTHOR_EMAIL", email.toString(), //$NON-NLS-1$
+					"GIT_AUTHOR_DATE", //$NON-NLS-1$
+					"@" + author.getWhenAsInstant().getEpochSecond() //$NON-NLS-1$
+							+ " " + zone); //$NON-NLS-1$
+		}
+		return this;
+	}
 
 	/**
 	 * The output stream to be used by the hook.
@@ -166,9 +212,18 @@ public abstract class GitHook<T> implements Callable<T> {
 		if (fs == null) {
 			fs = FS.DETECTED;
 		}
-		ProcessResult result = fs.runHookIfPresent(repository, getHookName(),
-				getParameters(), getOutputStream(), stderrStream,
-				getStdinArgs());
+		Map<String, String> invocationEnvironment = environment;
+		if (prefix != null) {
+			invocationEnvironment = new HashMap<>(environment);
+			invocationEnvironment.put("GIT_PREFIX", prefix); //$NON-NLS-1$
+		}
+		ProcessResult result = invocationEnvironment.isEmpty()
+				? fs.runHookIfPresent(repository, getHookName(),
+						getParameters(), getOutputStream(), stderrStream,
+						getStdinArgs())
+				: fs.runHookIfPresent(repository, getHookName(),
+						getParameters(), getOutputStream(), stderrStream,
+						getStdinArgs(), invocationEnvironment);
 		if (result.isExecutedWithError()) {
 			handleError(new String(errorByteArray.toByteArray(),
 					SystemReader.getInstance().getDefaultCharset().name()),
@@ -189,8 +244,7 @@ public abstract class GitHook<T> implements Callable<T> {
 	 *             When the hook should be aborted
 	 * @since 5.11
 	 */
-	protected void handleError(String message,
-			final ProcessResult result)
+	protected void handleError(String message, final ProcessResult result)
 			throws AbortedByHookException {
 		throw new AbortedByHookException(message, getHookName(),
 				result.getExitCode());

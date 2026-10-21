@@ -88,6 +88,8 @@ import org.slf4j.LoggerFactory;
 public abstract class FS {
 	private static final Logger LOG = LoggerFactory.getLogger(FS.class);
 
+	private final ThreadLocal<Map<String, String>> hookEnvironment = new ThreadLocal<>();
+
 	/**
 	 * An empty array of entries, suitable as a return value for
 	 * {@link #list(File, FileModeStrategy)}.
@@ -1904,6 +1906,48 @@ public abstract class FS {
 	}
 
 	/**
+	 * Run a hook with additional operation-specific environment variables. The
+	 * existing six-argument overload remains the dispatch point, including
+	 * filesystem overrides. Nested calls restore the previous environment.
+	 *
+	 * @param repository
+	 *            repository containing the hook
+	 * @param hookName
+	 *            event to execute
+	 * @param args
+	 *            hook arguments
+	 * @param outRedirect
+	 *            destination for standard output
+	 * @param errRedirect
+	 *            destination for standard error
+	 * @param stdinArgs
+	 *            input for the hook, or null
+	 * @param environment
+	 *            variables to overlay for this invocation only
+	 * @return hook execution result
+	 * @throws JGitInternalException
+	 *             if the hook cannot be started or executed
+	 * @since 7.8
+	 */
+	public ProcessResult runHookIfPresent(Repository repository,
+			String hookName, String[] args, OutputStream outRedirect,
+			OutputStream errRedirect, String stdinArgs,
+			Map<String, String> environment) throws JGitInternalException {
+		Map<String, String> previous = hookEnvironment.get();
+		try {
+			hookEnvironment.set(Map.copyOf(environment));
+			return runHookIfPresent(repository, hookName, args, outRedirect,
+					errRedirect, stdinArgs);
+		} finally {
+			if (previous == null) {
+				hookEnvironment.remove();
+			} else {
+				hookEnvironment.set(previous);
+			}
+		}
+	}
+
+	/**
 	 * See
 	 * {@link #runHookIfPresent(Repository, String, String[], OutputStream, OutputStream, String)}
 	 * . Should only be called by FS supporting shell scripts execution.
@@ -2242,6 +2286,11 @@ public abstract class FS {
 			environment.put(Constants.GIT_WORK_TREE_KEY,
 					repository.getWorkTree().getAbsolutePath());
 		}
+		Map<String, String> additional = hookEnvironment.get();
+		if (additional != null) {
+			environment.putAll(additional);
+		}
+
 		switch (hookName) {
 		case "pre-commit": //$NON-NLS-1$
 		case "pre-merge-commit": //$NON-NLS-1$

@@ -17,14 +17,24 @@ public class CommitHookCommandTest extends CommitHookTestCase {
 	@Override
 	protected RevCommit commitStaged() throws Exception {
 		try (Git git = Git.wrap(db)) {
-			return git.commit().setMessage("first").call();
+			return git.commit().setHookPrefix(hookPrefix).setMessage("first").call();
 		}
 	}
 
 	@Override
 	protected RevCommit commitWithoutVerification() throws Exception {
 		try (Git git = Git.wrap(db)) {
-			return git.commit().setMessage("bypass").setNoVerify(true).call();
+			return git.commit().setHookPrefix(hookPrefix).setMessage("bypass").setNoVerify(true).call();
 		}
 	}
+
+	@Override
+	protected RevCommit commitAs(org.eclipse.jgit.lib.PersonIdent author,
+			boolean amend) throws Exception {
+		try (Git git = Git.wrap(db)) {
+			return git.commit().setHookPrefix(hookPrefix).setMessage("author test").setAuthor(author)
+					.setAmend(amend).call();
+		}
+	}
+
 }
