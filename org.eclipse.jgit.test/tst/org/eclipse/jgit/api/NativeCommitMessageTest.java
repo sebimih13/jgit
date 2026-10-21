@@ -22,6 +22,8 @@ public class NativeCommitMessageTest extends NativeCommitMessageTestCase {
 			boolean allowEmptyMessage) throws Exception {
 		try (Git git = Git.wrap(db)) {
 			return git.commit().setMessage(message).setCleanupMode(cleanup).setDefaultClean(false)
+					.setAmend(scenario.contains("amend-reuse"))
+					.setAll(scenario.equals("cherry-all-repository-message"))
 					.setUseNativeMessageCleanup(true).setAllowEmptyMessage(allowEmptyMessage)
 					.setNoVerify(noVerify).call();
 		}

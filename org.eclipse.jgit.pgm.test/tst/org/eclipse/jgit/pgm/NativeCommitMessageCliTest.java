@@ -29,7 +29,11 @@ public class NativeCommitMessageCliTest extends NativeCommitMessageTestCase {
 		command.setCommandName("commit");
 		command.initRaw(db, null, new ByteArrayInputStream(new byte[0]),
 				new ByteArrayOutputStream(), new ByteArrayOutputStream());
-		List<String> args = new ArrayList<>(List.of("-m", message));
+		List<String> args = new ArrayList<>();
+		if (message != null) args.addAll(List.of("-m", message));
+		else args.add("--no-edit");
+		if (scenario.contains("amend-reuse")) args.add("--amend");
+		if (scenario.equals("cherry-all-repository-message")) args.add("--all");
 		if (cleanup != CleanupMode.DEFAULT) args.add("--cleanup=" + cleanup.name().toLowerCase(Locale.ROOT));
 		if (noVerify) args.add("--no-verify");
 		if (allowEmptyMessage) args.add("--allow-empty-message");

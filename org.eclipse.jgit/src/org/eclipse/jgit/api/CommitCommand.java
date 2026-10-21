@@ -204,6 +204,16 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			WrongRepositoryStateException {
 		checkCallable();
 		Collections.sort(only);
+		CommitConfig config = useNativeMessageCleanup
+				? repo.getConfig().get(CommitConfig.KEY) : null;
+		String nativeCommentPrefix = "#"; //$NON-NLS-1$
+		if (config != null) {
+			try {
+				nativeCommentPrefix = config.getCommentString();
+			} catch (IllegalArgumentException invalid) {
+				throw new JGitInternalException(invalid.getMessage(), invalid);
+			}
+		}
 
 		try (RevWalk rw = new RevWalk(repo)) {
 			RepositoryState state = repo.getRepositoryState();
@@ -222,6 +232,11 @@ public class CommitCommand extends GitCommand<RevCommit> {
 					if (original != null) {
 						author = rw.parseCommit(original).getAuthorIdent();
 					}
+				} else if (state == RepositoryState.CHERRY_PICKING_RESOLVED) {
+					ObjectId cherryPickHead = repo.readCherryPickHead();
+					if (cherryPickHead != null) {
+						author = rw.parseCommit(cherryPickHead).getAuthorIdent();
+					}
 				} else {
 					author = committer;
 				}
@@ -234,9 +249,15 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			}
 
 			String messageSource;
+			String messageSourceCommit = null;
 			if (message != null) {
 				messageSource = "message"; //$NON-NLS-1$
+			} else if (amend) {
+				messageSource = "commit"; //$NON-NLS-1$
+				messageSourceCommit = Constants.HEAD;
 			} else if (state == RepositoryState.MERGING_RESOLVED
+					|| state == RepositoryState.CHERRY_PICKING_RESOLVED
+					|| state == RepositoryState.REVERTING_RESOLVED
 					|| isMergeDuringRebase(state)) {
 				messageSource = "merge"; //$NON-NLS-1$
 			} else {
@@ -298,9 +319,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 				}
 
 				Character selectedComment = null;
-				CommitConfig config = null;
-				if (useNativeMessageCleanup) {
-					config = repo.getConfig().get(CommitConfig.KEY);
+				if (config != null) {
 					if (cleanupMode == CleanupMode.DEFAULT) {
 						cleanupMode = config.resolve(cleanupMode, cleanDefaultIsStrip);
 					}
@@ -312,7 +331,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						message = CommitConfig.cleanText(message,
 								CleanupMode.WHITESPACE, (char) 0, true);
 					}
-					if (commentChar == null && config.isAutoCommentChar()) {
+					if (commentChar == null && config.isAutoCommentString()) {
 						repo.writeCommitEditMsg(message);
 						char chosen = CommitConfig.determineCommentChar(message, true);
 						if (chosen == 0) {
@@ -326,7 +345,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						.prepareCommitMsg(repo,
 								hookOutRedirect.get(PrepareCommitMsgHook.NAME),
 								hookErrRedirect.get(PrepareCommitMsgHook.NAME))
-						.setMessageSource(messageSource, null)
+						.setMessageSource(messageSource, messageSourceCommit)
 						.setCommitMessage(message)).call();
 
 				if (!noVerify) {
@@ -342,15 +361,13 @@ public class CommitCommand extends GitCommand<RevCommit> {
 					cleanupMode = config.resolve(cleanupMode, cleanDefaultIsStrip);
 				}
 				char comments = (char) 0;
-				if (CleanupMode.STRIP.equals(cleanupMode)
-						|| CleanupMode.SCISSORS.equals(cleanupMode)) {
+				if (!useNativeMessageCleanup && (CleanupMode.STRIP.equals(cleanupMode)
+						|| CleanupMode.SCISSORS.equals(cleanupMode))) {
 					if (commentChar == null) {
 						if (config == null) {
 							config = repo.getConfig().get(CommitConfig.KEY);
 						}
-						if (selectedComment != null) {
-							comments = selectedComment.charValue();
-						} else if (config.isAutoCommentChar()) {
+						if (config.isAutoCommentChar()) {
 							// We're supposed to pick a character that isn't used,
 							// but then cleaning up won't remove any lines. So don't
 							// bother.
@@ -363,8 +380,17 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						comments = commentChar.charValue();
 					}
 				}
-				message = CommitConfig.cleanText(message, cleanupMode, comments,
-						useNativeMessageCleanup);
+				if (useNativeMessageCleanup) {
+					String prefix = nativeCommentPrefix;
+					if (commentChar != null) {
+						prefix = commentChar.toString();
+					} else if (selectedComment != null) {
+						prefix = selectedComment.toString();
+					}
+					message = CommitConfig.cleanText(message, cleanupMode, prefix);
+				} else {
+					message = CommitConfig.cleanText(message, cleanupMode, comments);
+				}
 				if (!allowEmptyMessage && (useNativeMessageCleanup
 						? CommitConfig.isEmptyMessage(message, cleanupMode) : message.isEmpty())) {
 					throw new NoMessageException(JGitText.get().commitMessageNotSpecified);
@@ -735,6 +761,17 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			// TODO(ch) align the defaults with native git
 			allowEmpty = only.isEmpty() ? Boolean.TRUE : Boolean.FALSE;
 
+		if (amend && message == null) {
+			try {
+				ObjectId head = repo.resolve(Constants.HEAD + "^{commit}"); //$NON-NLS-1$
+				if (head != null) {
+					message = rw.parseCommit(head).getFullMessage();
+				}
+			} catch (IOException e) {
+				throw new JGitInternalException(e.getMessage(), e);
+			}
+		}
+
 		// when doing a merge commit parse MERGE_HEAD and MERGE_MSG files
 		if (state == RepositoryState.MERGING_RESOLVED
 				|| isMergeDuringRebase(state)) {
@@ -759,6 +796,16 @@ public class CommitCommand extends GitCommand<RevCommit> {
 							JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
 							Constants.MERGE_MSG, e), e);
 				}
+			}
+		} else if ((state == RepositoryState.CHERRY_PICKING_RESOLVED
+				|| state == RepositoryState.REVERTING_RESOLVED)
+				&& message == null) {
+			try {
+				message = repo.readMergeCommitMsg();
+			} catch (IOException e) {
+				throw new JGitInternalException(MessageFormat.format(
+						JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
+						Constants.MERGE_MSG, e), e);
 			}
 		} else if (state == RepositoryState.SAFE && message == null) {
 			try {
@@ -803,7 +850,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 * Set the commit message
 	 *
 	 * @param message
-	 *            the commit message used for the {@code commit}
+	 *            the commit message used for the {@code commit}; null selects a
+	 *            prepared repository message, or HEAD's message when amending
 	 * @return {@code this}
 	 */
 	public CommitCommand setMessage(String message) {
@@ -972,7 +1020,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 * Sets the author for this {@code commit}. If no author is explicitly
 	 * specified because this method is never called or called with {@code null}
 	 * value then the author will be set to the committer or to the original
-	 * author when amending.
+	 * author when amending or continuing a resolved cherry-pick.
 	 *
 	 * @param author
 	 *            the author used for the {@code commit}
@@ -987,7 +1035,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	/**
 	 * Sets the author for this {@code commit}. If no author is explicitly
 	 * specified because this method is never called then the author will be set
-	 * to the committer or to the original author when amending.
+	 * to the committer or to the original author when amending or continuing a
+	 * resolved cherry-pick.
 	 *
 	 * @param name
 	 *            the name of the author used for the {@code commit}

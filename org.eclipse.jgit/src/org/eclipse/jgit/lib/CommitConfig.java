@@ -107,6 +107,12 @@ public class CommitConfig {
 
 	private boolean autoCommentChar = false;
 
+	private String commentString = "#"; //$NON-NLS-1$
+
+	private boolean autoCommentString;
+
+	private ConfigLine invalidCommentString;
+
 	private CommitConfig(Config rc) {
 		commitTemplatePath = rc.getString(ConfigConstants.CONFIG_COMMIT_SECTION,
 				null, ConfigConstants.CONFIG_KEY_COMMIT_TEMPLATE);
@@ -126,6 +132,60 @@ public class CommitConfig {
 				}
 			}
 		}
+		readCommentString(rc.getState());
+	}
+
+	private void readCommentString(ConfigSnapshot snapshot) {
+		if (snapshot.baseState != null) {
+			readCommentString(snapshot.baseState);
+		}
+		for (ConfigLine entry : snapshot.entryList) {
+			if (!entry.match(ConfigConstants.CONFIG_CORE_SECTION, null,
+					ConfigConstants.CONFIG_KEY_COMMENT_CHAR)
+					&& !entry.match(ConfigConstants.CONFIG_CORE_SECTION, null,
+							"commentString")) { //$NON-NLS-1$
+				continue;
+			}
+			String value = entry.value;
+			if (value == null || Config.isMissing(value) || value.isEmpty()
+					|| value.indexOf('\n') >= 0) {
+				if (invalidCommentString == null) {
+					invalidCommentString = entry;
+				}
+				continue;
+			}
+			autoCommentString = "auto".equalsIgnoreCase(value); //$NON-NLS-1$
+			commentString = autoCommentString ? "#" : value; //$NON-NLS-1$
+		}
+	}
+
+	/**
+	 * Get the native comment prefix. The last core.commentChar or
+	 * core.commentString entry wins, including inherited and included entries.
+	 * Existing character-based accessors retain their legacy behavior.
+	 *
+	 * @return full prefix, or {@code #} for automatic selection
+	 * @throws IllegalArgumentException
+	 *             if any prefix entry is missing, empty or contains LF
+	 * @since 7.8
+	 */
+	public String getCommentString() {
+		if (invalidCommentString != null) {
+			throw new IllegalArgumentException(MessageFormat.format(
+					JGitText.get().invalidCommentString, invalidCommentString.name));
+		}
+		return commentString;
+	}
+
+	/**
+	 * Whether automatic selection is enabled by the effective native prefix
+	 * configuration, considering both comment-key aliases in declaration order.
+	 *
+	 * @return whether native comment selection is automatic
+	 * @since 7.8
+	 */
+	public boolean isAutoCommentString() {
+		return autoCommentString;
 	}
 
 	/**
@@ -332,13 +392,38 @@ public class CommitConfig {
 	 */
 	public static String cleanText(@NonNull String text,
 			@NonNull CleanupMode mode, char commentChar, boolean nativeRules) {
+		return cleanText(text, mode, String.valueOf(commentChar), nativeRules);
+	}
+
+	/**
+	 * Clean a message with native Git whitespace and full-prefix comment rules.
+	 *
+	 * @param text
+	 *            message to process
+	 * @param mode
+	 *            resolved cleanup policy
+	 * @param commentPrefix
+	 *            nonempty comment prefix for STRIP and SCISSORS
+	 * @return cleaned message
+	 * @since 7.8
+	 */
+	public static String cleanText(@NonNull String text,
+			@NonNull CleanupMode mode, @NonNull String commentPrefix) {
+		if (commentPrefix.isEmpty()) {
+			throw new IllegalArgumentException("Empty comment prefix"); //$NON-NLS-1$
+		}
+		return cleanText(text, mode, commentPrefix, true);
+	}
+
+	private static String cleanText(String text, CleanupMode mode,
+			String commentPrefix, boolean nativeRules) {
 		String toProcess = text;
 		boolean strip = false;
 		switch (mode) {
 		case VERBATIM:
 			return text;
 		case SCISSORS:
-			String cut = commentChar + CUT;
+			String cut = commentPrefix + CUT;
 			if (text.startsWith(cut)) {
 				return ""; //$NON-NLS-1$
 			}
@@ -361,6 +446,10 @@ public class CommitConfig {
 		StringBuilder result = new StringBuilder();
 		boolean lastWasEmpty = true;
 		for (String line : toProcess.split("\n")) { //$NON-NLS-1$
+			// Native stripspace tests the prefix before trimming the line.
+			if (strip && nativeRules && line.startsWith(commentPrefix)) {
+				continue;
+			}
 			if (nativeRules) {
 				int end = line.length();
 				while (end > 0 && isNativeWhitespace(line.charAt(end - 1))) {
@@ -375,8 +464,8 @@ public class CommitConfig {
 					result.append('\n');
 					lastWasEmpty = true;
 				}
-			} else if (!strip || !(nativeRules
-					? line.charAt(0) == commentChar : isComment(line, commentChar))) {
+			} else if (!strip || nativeRules
+					|| !isComment(line, commentPrefix.charAt(0))) {
 				lastWasEmpty = false;
 				result.append(line).append('\n');
 			}

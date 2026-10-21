@@ -187,6 +187,25 @@ public class CommitConfigTest {
 	}
 
 	@Test
+	public void inheritedCommentAliasesInvalidateCachedConfiguration()
+			throws Exception {
+		Config base = new Config();
+		base.fromText("[core]\ncommentString = //\n");
+		Config local = new Config(base);
+		local.fromText("[core]\ncommentChar = \";\"\n");
+		assertEquals(";", local.get(CommitConfig.KEY).getCommentString());
+		local.unset("core", null, "commentChar");
+		assertEquals("//", local.get(CommitConfig.KEY).getCommentString());
+		base.setString("core", null, "commentString", "auto");
+		CommitConfig auto = local.get(CommitConfig.KEY);
+		assertTrue(auto.isAutoCommentString());
+		assertEquals("#", auto.getCommentString());
+		local.setString("core", null, "commentString", "⁑⁕⁑");
+		assertEquals("⁑⁕⁑", local.get(CommitConfig.KEY).getCommentString());
+		assertFalse(local.get(CommitConfig.KEY).isAutoCommentString());
+	}
+
+	@Test
 	public void testCommentCharEmpty() throws Exception {
 		CommitConfig cfg = parse("[core]\n\tcommentChar =\n");
 		assertEquals('#', cfg.getCommentChar());

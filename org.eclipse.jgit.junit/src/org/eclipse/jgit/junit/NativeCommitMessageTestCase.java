@@ -18,11 +18,16 @@ import static org.junit.Assert.assertTrue;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
 
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.lib.CommitConfig.CleanupMode;
+import org.eclipse.jgit.lib.CommitBuilder;
+import org.eclipse.jgit.lib.ObjectInserter;
+import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.util.FS;
@@ -67,7 +72,22 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 				"auto-indented", "auto-carriage-return", "auto-candidate-order",
 				"auto-trailing-comments", "auto-trailing-conflicts", "auto-nontrailing-comments",
 				"auto-scissors-tail", "auto-exhausted", "auto-exhausted-whitespace",
-				"auto-exhausted-verbatim", "bypass-auto-exhausted", "auto-hook-config-change" }).map(name -> new Object[] { name }).toList();
+				"auto-exhausted-verbatim", "bypass-auto-exhausted", "auto-hook-config-change",
+				"auto-prior-marker", "auto-prior-prefix", "auto-prior-marker-order",
+				"prefix-char", "prefix-string", "prefix-unicode", "prefix-space",
+				"prefix-char-after-string", "prefix-string-after-char", "prefix-interleaved",
+				"prefix-include-last", "prefix-after-include", "prefix-string-auto",
+				"prefix-string-frozen", "prefix-no-editor-scissors", "prefix-whitespace",
+				"prefix-verbatim", "prefix-empty", "prefix-space-hook", "prefix-precommit-change",
+				"prefix-auto-overridden", "prefix-invalid-char-empty", "prefix-invalid-char-newline",
+				"prefix-invalid-char-bare", "prefix-invalid-empty",
+				"prefix-invalid-newline", "prefix-invalid-bare", "prefix-invalid-overridden",
+				"cherry-explicit", "bypass-cherry-explicit", "cherry-repository-message",
+				"cherry-prepare-edit", "cherry-reject", "cherry-empty-message", "cherry-all-repository-message",
+				"revert-explicit", "revert-repository-message", "revert-prepare-edit", "revert-reject",
+				"revert-empty-message", "bypass-revert-repository-message", "amend-reuse",
+				"amend-reuse-edit", "amend-reuse-reject", "bypass-amend-reuse"
+				}).map(name -> new Object[] { name }).toList();
 	}
 
 	/**
@@ -128,8 +148,19 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 		boolean executable = !scenario.endsWith("nonexec");
 		boolean reject = scenario.equals("failure");
 		boolean allowEmpty = scenario.endsWith("-allow");
-		boolean prepareEdit = scenario.equals("prepare-edit");
+		boolean prepareEdit = scenario.equals("prepare-edit") || scenario.equals("cherry-prepare-edit")
+				|| scenario.equals("revert-prepare-edit") || scenario.equals("amend-reuse-edit");
+		boolean cherry = scenario.contains("cherry-");
+		boolean reverting = scenario.contains("revert-");
+		boolean amending = scenario.contains("amend-reuse");
+		PersonIdent cherryAuthor = new PersonIdent("Cherry Author", "cherry@example.invalid",
+				Instant.ofEpochSecond(946684800L), ZoneOffset.ofHoursMinutes(5, 45));
+		String messageSource = "message";
+		String messageCommit = null;
+		String committedContents = "staged\n";
 		boolean earlyReject = scenario.contains("auto-exhausted");
+		boolean invalidPrefix = scenario.startsWith("prefix-invalid-");
+		String prefixConfig = null;
 		int hookCode = scenario.endsWith("failure") && !scenario.equals("post-failure") ? 7 : 0;
 		switch (scenario) {
 		case "edit-message": case "bypass-edit": replacement = "new message\n"; expected = bypass ? beforePrepare : replacement; break;
@@ -177,35 +208,168 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 			break;
 		case "auto-hook-config-change": input = "# occupied\nsubject"; replacement = "# retained\n; removed\n! retained\nsubject"; expected = "# retained\n! retained\nsubject\n"; break;
 
+		case "auto-prior-marker": case "auto-prior-prefix":
+			input = "# occupied\nsubject\n" + (scenario.equals("auto-prior-prefix") ? ";;" : ";") + " trailing";
+			replacement = "# retained\n; retained\n@ removed\nsubject"; expected = "# retained\n; retained\nsubject\n"; break;
+		case "auto-prior-marker-order": input = "# occupied\n; occupied\nsubject\n@ trailing"; replacement = "# retained\n; retained\n@ retained\n! removed\nsubject"; expected = "# retained\n; retained\n@ retained\nsubject\n"; break;
+
 		default: break;
 		}
+		if (scenario.startsWith("prefix-")) {
+			cleanup = CleanupMode.STRIP;
+			input = "# retained\n/ retained\n// removed\n; retained\nsubject";
+			expected = "# retained\n/ retained\n; retained\nsubject\n";
+			prefixConfig = "[core]\ncommentString = //\n";
+			switch (scenario) {
+			case "prefix-char": prefixConfig = "[core]\ncommentChar = //\n"; break;
+			case "prefix-unicode":
+				prefixConfig = "[core]\ncommentString = ⁑⁕⁑\n";
+				input = "⁑ retained\n⁑⁕ retained\n⁑⁕⁑ removed\nsubject";
+				expected = "⁑ retained\n⁑⁕ retained\nsubject\n"; break;
+			case "prefix-space":
+				prefixConfig = "[core]\ncommentString = \"// \"\n";
+				input = "//retained\n// removed\n  // retained\nsubject";
+				expected = "//retained\n  // retained\nsubject\n"; break;
+			case "prefix-char-after-string": case "prefix-interleaved":
+				prefixConfig = "[core]\n" + (scenario.equals("prefix-interleaved") ? "commentChar = !\n" : "")
+						+ "commentString = //\ncommentChar = \";\"\n";
+				expected = "# retained\n/ retained\n// removed\nsubject\n"; break;
+			case "prefix-string-after-char":
+				prefixConfig = "[core]\ncommentChar = \";\"\ncommentString = //\n"; break;
+			case "prefix-auto-overridden":
+				prefixConfig = "[core]\ncommentChar = auto\ncommentString = //\n"; break;
+			case "prefix-space-hook":
+				prefixConfig = "[core]\ncommentString = \"// \"\n";
+				replacement = "// \nsubject"; expected = "subject\n"; break;
+			case "prefix-include-last": case "prefix-after-include":
+				Files.writeString(path("prefix.config"), "[core]\ncommentString = //\n");
+				String include = "[include]\npath = prefix.config\n";
+				String local = "[core]\ncommentChar = \";\"\n";
+				prefixConfig = scenario.equals("prefix-include-last") ? local + include : include + local;
+				if (scenario.equals("prefix-after-include")) expected = "# retained\n/ retained\n// removed\nsubject\n";
+				break;
+			case "prefix-string-auto":
+				prefixConfig = "[core]\ncommentString = auto\n";
+				input = "# occupied\nsubject";
+				replacement = "# retained\n; removed\nsubject";
+				expected = "# retained\nsubject\n"; break;
+			case "prefix-no-editor-scissors":
+				cleanup = CleanupMode.SCISSORS;
+				input = "subject\n// ------------------------ >8 ------------------------\nretained";
+				expected = input + "\n"; break;
+			case "prefix-whitespace": cleanup = CleanupMode.WHITESPACE; expected = input + "\n"; break;
+			case "prefix-verbatim": cleanup = CleanupMode.VERBATIM; replacement = "// retained\nsubject"; expected = replacement; break;
+			case "prefix-empty": input = "// comment"; expected = ""; reject = true; break;
+			case "prefix-invalid-empty": prefixConfig = "[core]\ncommentString = \"\"\n"; break;
+			case "prefix-invalid-newline": prefixConfig = "[core]\ncommentString = \"/\\n/\"\n"; break;
+			case "prefix-invalid-bare": prefixConfig = "[core]\ncommentString\n"; break;
+			case "prefix-invalid-char-empty": prefixConfig = "[core]\ncommentChar = \"\"\n"; break;
+			case "prefix-invalid-char-newline": prefixConfig = "[core]\ncommentChar = \"/\\n/\"\n"; break;
+			case "prefix-invalid-char-bare": prefixConfig = "[core]\ncommentChar\n"; break;
+			case "prefix-invalid-overridden": prefixConfig = "[core]\ncommentString = \"\"\ncommentChar = \"#\"\n"; break;
+			default: break;
+			}
+			beforePrepare = input + "\n";
+			beforeMessage = beforePrepare;
+			reject |= invalidPrefix;
+		}
 		if (scenario.contains("auto-")) {
-			db.getConfig().setString("core", null, "commentChar", "auto");
+			if (scenario.equals("auto-prior-marker")) {
+				db.getConfig().setStringList("core", null, "commentChar", List.of(";", "auto"));
+			} else if (scenario.equals("auto-prior-prefix")) {
+				db.getConfig().setStringList("core", null, "commentChar", List.of(";;", "auto"));
+			} else if (scenario.equals("auto-prior-marker-order")) {
+				db.getConfig().setStringList("core", null, "commentChar", List.of(";", "@", "auto"));
+			} else {
+				db.getConfig().setString("core", null, "commentChar", "auto");
+			}
 			cleanup = scenario.equals("auto-exhausted-whitespace") ? CleanupMode.WHITESPACE
 					: scenario.equals("auto-exhausted-verbatim") ? CleanupMode.VERBATIM : CleanupMode.STRIP;
 			beforePrepare = input + "\n";
 			beforeMessage = beforePrepare;
 		}
 
+		if (cherry || reverting) {
+			CommitBuilder source = new CommitBuilder();
+			source.setTreeId(initial.getTree());
+			source.setParentId(initial);
+			source.setAuthor(cherryAuthor);
+			source.setCommitter(initial.getCommitterIdent());
+			source.setMessage("picked message\n");
+			try (ObjectInserter inserter = db.newObjectInserter()) {
+				if (cherry) db.writeCherryPickHead(inserter.insert(source));
+				else db.writeRevertHead(inserter.insert(source));
+				inserter.flush();
+			}
+			String repositoryMessage = scenario.endsWith("empty-message") ? "" : "repository message\n";
+			db.writeMergeCommitMsg(repositoryMessage);
+			if (scenario.equals("cherry-repository-message") || scenario.equals("cherry-all-repository-message") || prepareEdit
+					|| scenario.equals("cherry-empty-message") || reverting && !scenario.equals("revert-explicit")) {
+				input = null;
+				messageSource = "merge";
+				beforePrepare = repositoryMessage;
+				beforeMessage = prepareEdit ? "prepared" : beforePrepare;
+				expected = prepareEdit ? "prepared\n" : beforePrepare;
+			}
+			if (scenario.equals("cherry-reject")) { reject = true; hookCode = 7; }
+			if (scenario.equals("cherry-empty-message")) reject = true;
+			if (scenario.equals("revert-reject")) { reject = true; hookCode = 7; }
+			if (scenario.equals("revert-empty-message")) reject = true;
+			if (scenario.equals("cherry-all-repository-message")) {
+				committedContents = "from worktree\n";
+				writeTrashFile("file", committedContents);
+			}
+		}
+		if (amending) {
+			input = null;
+			messageSource = "commit";
+			messageCommit = "HEAD";
+			beforePrepare = initial.getFullMessage();
+			if (!beforePrepare.endsWith("\n")) beforePrepare += "\n";
+			beforeMessage = prepareEdit ? "prepared" : beforePrepare;
+			expected = prepareEdit ? "prepared\n" : beforePrepare;
+			if (scenario.equals("amend-reuse-reject")) { reject = true; hookCode = 7; }
+		}
+		if (prefixConfig != null) {
+			db.getConfig().fromText(db.getConfig().toText() + prefixConfig);
+		}
 		db.getConfig().save();
-		hook("pre-commit", "test \"$#\" = 0\n");
-		hook("prepare-commit-msg", "test \"$#\" = 2 && test \"$2\" = message || exit 21\n"
+		db.getConfig().load();
+		hook("pre-commit", (cherry ? authorRecord("pre-commit") : "") + "test \"$#\" = 0\n"
+				+ (reverting ? "test \"$GIT_AUTHOR_NAME\" != 'Cherry Author' || exit 24\n" : "")
+				+ (scenario.equals("prefix-precommit-change") ? "git config core.commentString '!'\n" : ""));
+		hook("prepare-commit-msg", (cherry ? authorRecord("prepare-commit-msg") : "")
+				+ "test \"$#\" = " + (messageCommit == null ? "2" : "3")
+				+ " && test \"$2\" = " + messageSource + " || exit 21\n"
+				+ (messageCommit == null ? "" : "test \"$3\" = " + messageCommit + " || exit 25\n")
 				+ "cp \"$1\" \"$GIT_DIR/prepare.input\"\n"
 				+ (prepareEdit ? "printf prepared >\"$1\"\n" : "")
-				+ (scenario.equals("auto-hook-config-change") ? "git config core.commentChar '!'\n" : ""));
+				+ (scenario.equals("auto-hook-config-change") ? "git config core.commentChar '!'\n" : "")
+				+ (scenario.equals("prefix-string-frozen") ? "git config core.commentString '!'\n" : ""));
 		if (hasMessageHook) {
 			if (replacement != null) Files.writeString(path("replacement"), replacement);
-			Path p = hook("commit-msg", "test \"$#\" = 1 || exit 22\n"
+			Path p = hook("commit-msg", (cherry ? authorRecord("commit-msg") : "") + "test \"$#\" = 1 || exit 22\n"
 					+ "cp \"$1\" \"$GIT_DIR/message.input\"\n"
 					+ (replacement != null ? "cat \"$GIT_DIR/replacement\" >\"$1\"\n" : "")
 					+ "exit " + hookCode + "\n");
 			assertTrue(FS.DETECTED.setExecute(p.toFile(), executable));
 		}
-		hook("post-commit", "test \"$#\" = 0 || exit 23\nexit " + (scenario.equals("post-failure") ? 7 : 0) + "\n");
+		hook("post-commit", (cherry ? authorRecord("post-commit") : "")
+				+ "test \"$#\" = 0 || exit 23\nexit " + (scenario.equals("post-failure") ? 7 : 0) + "\n");
 		RevCommit result = null; Exception failure = null;
+		byte[] initialMessageFile = Files.readAllBytes(path("COMMIT_EDITMSG"));
 		try { result = commitMessage(input, cleanup, bypass, allowEmpty); }
 		catch (Exception caught) { failure = caught; }
 		assertEquals("Unexpected outcome in " + scenario + ": " + failure, reject, failure != null);
+		if (invalidPrefix) {
+			assertFalse(Files.exists(path("phases")));
+			assertFalse(Files.exists(path("prepare.input")));
+			assertFalse(Files.exists(path("message.input")));
+			assertArrayEquals(initialMessageFile, Files.readAllBytes(path("COMMIT_EDITMSG")));
+			assertEquals(initial, db.resolve("HEAD"));
+			try (Git git = Git.wrap(db)) { assertEquals(java.util.Set.of("file"), git.status().call().getChanged()); }
+			return;
+		}
 		if (earlyReject) {
 			assertFalse(Files.exists(path("prepare.input")));
 			assertFalse(Files.exists(path("message.input")));
@@ -222,15 +386,43 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 		String phases = (bypass ? "" : "pre-commit\n") + "prepare-commit-msg\n"
 				+ (messageRuns ? "commit-msg\n" : "") + (reject ? "" : "post-commit\n");
 		assertEquals(phases, Files.readString(path("phases")));
+		if (cherry) {
+			StringBuilder zone = new StringBuilder();
+			PersonIdent.appendTimezone(zone, cherryAuthor.getTimeZoneOffset());
+			String identity = "|" + cherryAuthor.getName() + "|" + cherryAuthor.getEmailAddress()
+					+ "|@" + cherryAuthor.getWhenAsInstant().getEpochSecond() + " " + zone + "\n";
+			StringBuilder records = new StringBuilder();
+			for (String phase : phases.split("\n")) records.append(phase).append(identity);
+			assertEquals(records.toString(), Files.readString(path("cherry-author")));
+			assertEquals(reject, Files.exists(path("CHERRY_PICK_HEAD")));
+			assertEquals(reject, Files.exists(path("MERGE_MSG")));
+			if (!reject) {
+				assertNotNull(result);
+				assertEquals(cherryAuthor.toExternalString(), result.getAuthorIdent().toExternalString());
+			}
+		}
 		if (reject) {
 			assertEquals(initial, db.resolve("HEAD"));
 			try (Git git = Git.wrap(db)) { assertEquals(java.util.Set.of("file"), git.status().call().getChanged()); }
 		} else {
-			assertNotNull(result); assertEquals(result, db.resolve("HEAD")); assertEquals(initial, result.getParent(0));
+			assertNotNull(result); assertEquals(result, db.resolve("HEAD"));
+			if (amending) {
+				assertArrayEquals(initial.getParents(), result.getParents());
+				assertEquals(initial.getAuthorIdent().toExternalString(), result.getAuthorIdent().toExternalString());
+			} else assertEquals(initial, result.getParent(0));
 			assertArrayEquals(expected.getBytes(StandardCharsets.UTF_8), result.getFullMessage().getBytes(StandardCharsets.UTF_8));
 			try (TreeWalk tree = TreeWalk.forPath(db, "file", result.getTree())) {
-				assertNotNull(tree); assertArrayEquals("staged\n".getBytes(StandardCharsets.UTF_8), db.open(tree.getObjectId(0)).getBytes());
+				assertNotNull(tree); assertArrayEquals(committedContents.getBytes(StandardCharsets.UTF_8), db.open(tree.getObjectId(0)).getBytes());
 			}
 		}
+		if (reverting) {
+			assertEquals(reject, Files.exists(path("REVERT_HEAD")));
+			assertEquals(reject, Files.exists(path("MERGE_MSG")));
+		}
+	}
+
+	private String authorRecord(String phase) {
+		return "printf '%s|%s|%s|%s\\n' '" + phase
+				+ "' \"$GIT_AUTHOR_NAME\" \"$GIT_AUTHOR_EMAIL\" \"$GIT_AUTHOR_DATE\" >>\"$GIT_DIR/cherry-author\"\n";
 	}
 }

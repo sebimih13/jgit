@@ -51,6 +51,7 @@ import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.CommitConfig.CleanupMode;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.RepositoryState;
 import org.eclipse.jgit.lib.UserConfig;
 import org.eclipse.jgit.pgm.internal.CLIText;
 import org.eclipse.jgit.pgm.opt.GpgSignHandler;
@@ -68,8 +69,11 @@ class Commit extends TextBuiltin {
 	@Option(name = "--author", metaVar = "metaVar_author", usage = "usage_CommitAuthor")
 	private String author;
 
-	@Option(name = "--message", aliases = { "-m" }, metaVar = "metaVar_message", usage = "usage_CommitMessage", required = true)
+	@Option(name = "--message", aliases = { "-m" }, metaVar = "metaVar_message", usage = "usage_CommitMessage")
 	private String message;
+
+	@Option(name = "--no-edit", usage = "usage_commitNoEdit")
+	private boolean noEdit;
 
 	@Option(name = "--only", aliases = { "-o" }, usage = "usage_CommitOnly")
 	private boolean only;
@@ -113,6 +117,9 @@ class Commit extends TextBuiltin {
 	@Override
 	protected void run() {
 		try (Git git = new Git(db)) {
+			if (message == null && !noEdit) {
+				throw die(CLIText.get().commitMessageOrNoEditRequired);
+			}
 			CleanupMode mode;
 			try {
 				mode = CleanupMode.valueOf(cleanup.toUpperCase(Locale.ROOT));
@@ -128,7 +135,8 @@ class Commit extends TextBuiltin {
 					throw die(CLIText.get().malformedAuthor);
 				}
 				commitCmd.setAuthor(new PersonIdent(parsed.getName(), parsed.getEmailAddress()));
-			} else if (!amend) {
+			} else if (!amend && db.getRepositoryState()
+					!= RepositoryState.CHERRY_PICKING_RESOLVED) {
 				UserConfig config = db.getConfig().get(UserConfig.KEY);
 				commitCmd.setAuthor(new PersonIdent(config.getAuthorName(), config.getAuthorEmail()));
 			}
