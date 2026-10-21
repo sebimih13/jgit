@@ -120,6 +120,7 @@ public class JGitText extends TranslationBundle {
 	/***/ public String cannotAccessLastModifiedForSafeDeletion;
 	/***/ public String cannotBeCombined;
 	/***/ public String cannotBeRecursiveWhenTreesAreIncluded;
+	/***/ public String cannotSelectCommentCharacter;
 	/***/ public String cannotChangeActionOnComment;
 	/***/ public String cannotCheckoutFromUnbornBranch;
 	/***/ public String cannotCheckoutOursSwitchBranch;

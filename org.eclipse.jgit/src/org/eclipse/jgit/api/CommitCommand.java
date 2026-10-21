@@ -146,6 +146,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 
 	private @NonNull CleanupMode cleanupMode = CleanupMode.VERBATIM;
 
+	private boolean useNativeMessageCleanup;
+
+	private boolean allowEmptyMessage = true;
+
 	private boolean cleanDefaultIsStrip = true;
 
 	private Character commentChar;
@@ -293,6 +297,31 @@ public class CommitCommand extends GitCommand<RevCommit> {
 					configureHook(Hooks.preMergeCommit(repo, null, null)).call();
 				}
 
+				Character selectedComment = null;
+				CommitConfig config = null;
+				if (useNativeMessageCleanup) {
+					config = repo.getConfig().get(CommitConfig.KEY);
+					if (cleanupMode == CleanupMode.DEFAULT) {
+						cleanupMode = config.resolve(cleanupMode, cleanDefaultIsStrip);
+					}
+					if (cleanupMode == CleanupMode.SCISSORS && !cleanDefaultIsStrip) {
+						cleanupMode = CleanupMode.WHITESPACE;
+					}
+					message = completeMessageLine(message);
+					if (cleanupMode != CleanupMode.VERBATIM) {
+						message = CommitConfig.cleanText(message,
+								CleanupMode.WHITESPACE, (char) 0, true);
+					}
+					if (commentChar == null && config.isAutoCommentChar()) {
+						repo.writeCommitEditMsg(message);
+						char chosen = CommitConfig.determineCommentChar(message, true);
+						if (chosen == 0) {
+							throw new JGitInternalException(JGitText.get().cannotSelectCommentCharacter);
+						}
+						selectedComment = Character.valueOf(chosen);
+					}
+				}
+
 				message = configureHook(Hooks
 						.prepareCommitMsg(repo,
 								hookOutRedirect.get(PrepareCommitMsgHook.NAME),
@@ -308,7 +337,6 @@ public class CommitCommand extends GitCommand<RevCommit> {
 							.setCommitMessage(message)).call();
 				}
 
-				CommitConfig config = null;
 				if (CleanupMode.DEFAULT.equals(cleanupMode)) {
 					config = repo.getConfig().get(CommitConfig.KEY);
 					cleanupMode = config.resolve(cleanupMode, cleanDefaultIsStrip);
@@ -320,7 +348,9 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						if (config == null) {
 							config = repo.getConfig().get(CommitConfig.KEY);
 						}
-						if (config.isAutoCommentChar()) {
+						if (selectedComment != null) {
+							comments = selectedComment.charValue();
+						} else if (config.isAutoCommentChar()) {
 							// We're supposed to pick a character that isn't used,
 							// but then cleaning up won't remove any lines. So don't
 							// bother.
@@ -333,7 +363,12 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						comments = commentChar.charValue();
 					}
 				}
-				message = CommitConfig.cleanText(message, cleanupMode, comments);
+				message = CommitConfig.cleanText(message, cleanupMode, comments,
+						useNativeMessageCleanup);
+				if (!allowEmptyMessage && (useNativeMessageCleanup
+						? CommitConfig.isEmptyMessage(message, cleanupMode) : message.isEmpty())) {
+					throw new NoMessageException(JGitText.get().commitMessageNotSpecified);
+				}
 
 				if (insertChangeId)
 					insertChangeId(indexTreeId);
@@ -384,6 +419,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			throw new JGitInternalException(
 					JGitText.get().exceptionCaughtDuringExecutionOfCommitCommand, e);
 		}
+	}
+
+	private static String completeMessageLine(String text) {
+		return text.isEmpty() || text.endsWith("\n") ? text : text + "\n"; //$NON-NLS-1$ //$NON-NLS-2$
 	}
 
 	private <H extends GitHook<?>> H configureHook(H hook) {
@@ -770,6 +809,34 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	public CommitCommand setMessage(String message) {
 		checkCallable();
 		this.message = message;
+		return this;
+	}
+
+	/**
+	 * Normalize the message file before message hooks and retain native final
+	 * newline semantics after cleanup. The selected cleanup mode still applies;
+	 * VERBATIM preserves hook edits exactly. With setDefaultClean(false),
+	 * SCISSORS follows the native no-editor WHITESPACE policy. Disabled by
+	 * default for compatibility.
+	 * @param nativeCleanup whether to use the native message-file protocol
+	 * @return this command
+	 * @since 7.8
+	 */
+	public CommitCommand setUseNativeMessageCleanup(boolean nativeCleanup) {
+		checkCallable();
+		useNativeMessageCleanup = nativeCleanup;
+		return this;
+	}
+
+	/**
+	 * Permit an empty message after hooks and cleanup. Defaults to true.
+	 * @param allow whether an empty final message is allowed
+	 * @return this command
+	 * @since 7.8
+	 */
+	public CommitCommand setAllowEmptyMessage(boolean allow) {
+		checkCallable();
+		allowEmptyMessage = allow;
 		return this;
 	}
 

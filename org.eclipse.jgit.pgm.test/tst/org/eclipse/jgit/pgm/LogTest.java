@@ -30,7 +30,7 @@ public class LogTest extends CLIRepositoryTestCase {
 	public void testLogCommitNewFile() throws Exception {
 		String result = toString(execute("git log"));
 		assertEquals(
-				toString("commit a011a2746913097addc5dd48da2cbfc688d7f850",
+				toString("commit e6d7a5c3c173b028c8fdc6e69d709a77cabd3edb",
 						"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 						"Date:   Sat Aug 15 20:12:58 2009 -0330", "added"),
 				result);
@@ -40,7 +40,7 @@ public class LogTest extends CLIRepositoryTestCase {
 	public void testLogNameOnly() throws Exception {
 		String result = toString(execute("git log --name-only"));
 		assertEquals(
-				toString("commit a011a2746913097addc5dd48da2cbfc688d7f850",
+				toString("commit e6d7a5c3c173b028c8fdc6e69d709a77cabd3edb",
 						"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 						"Date:   Sat Aug 15 20:12:58 2009 -0330", "added", "a",
 						"b"),
@@ -50,7 +50,7 @@ public class LogTest extends CLIRepositoryTestCase {
 	@Test
 	public void testDiffCommitModifiedFileNameStatus() throws Exception {
 		String result = toString(execute("git log --name-status"));
-		assertEquals(toString("commit a011a2746913097addc5dd48da2cbfc688d7f850",
+		assertEquals(toString("commit e6d7a5c3c173b028c8fdc6e69d709a77cabd3edb",
 				"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 				"Date:   Sat Aug 15 20:12:58 2009 -0330", "added", "A\ta",
 				"A\tb"),

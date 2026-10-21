@@ -35,7 +35,7 @@ public class ShowTest extends CLIRepositoryTestCase {
 	public void testShow() throws Exception {
 		String result = toString(execute("git show"));
 		assertEquals(
-				toString("commit 5095e77c8d9a364f5ded87f1679103f1982b0a8b",
+				toString("commit 9b653ee786fa13e50cf5ab4dad3b7c6f31668269",
 						"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 						"Date:   Sat Aug 15 20:12:58 2009 -0330", "",
 						"    modified", "", "diff --git a/a b/a",
@@ -47,7 +47,7 @@ public class ShowTest extends CLIRepositoryTestCase {
 	@Test
 	public void testShowNameOnly() throws Exception {
 		String result = toString(execute("git show --name-only"));
-		assertEquals(toString("commit 5095e77c8d9a364f5ded87f1679103f1982b0a8b",
+		assertEquals(toString("commit 9b653ee786fa13e50cf5ab4dad3b7c6f31668269",
 				"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 				"Date:   Sat Aug 15 20:12:58 2009 -0330", "", "    modified",
 				"a"), result);
@@ -56,7 +56,7 @@ public class ShowTest extends CLIRepositoryTestCase {
 	@Test
 	public void testShowNameStatus() throws Exception {
 		String result = toString(execute("git show --name-status"));
-		assertEquals(toString("commit 5095e77c8d9a364f5ded87f1679103f1982b0a8b",
+		assertEquals(toString("commit 9b653ee786fa13e50cf5ab4dad3b7c6f31668269",
 				"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>",
 				"Date:   Sat Aug 15 20:12:58 2009 -0330", "", "    modified",
 				"M\ta"), result);

@@ -41,12 +41,14 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import org.eclipse.jgit.api.CommitCommand;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.CommitConfig.CleanupMode;
 import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.PersonIdent;
 import org.eclipse.jgit.lib.UserConfig;
@@ -81,6 +83,17 @@ class Commit extends TextBuiltin {
 	@Option(name = "--amend", usage = "usage_CommitAmend")
 	private boolean amend;
 
+	@Option(name = "--allow-empty-message", usage = "usage_commitAllowEmptyMessage")
+	private boolean allowEmptyMessage;
+
+	@Option(name = "--cleanup", metaVar = "metaVar_mode", usage = "usage_commitCleanup")
+	private String cleanup = "default"; //$NON-NLS-1$
+
+	@Option(name = "--verify", usage = "usage_commitVerify")
+	private void verify(boolean verify) {
+		noVerify = !verify;
+	}
+
 	@Option(name = "--no-verify", aliases = { "-n" }, usage = "usage_commitNoVerify")
 	private boolean noVerify;
 
@@ -100,7 +113,15 @@ class Commit extends TextBuiltin {
 	@Override
 	protected void run() {
 		try (Git git = new Git(db)) {
-			CommitCommand commitCmd = git.commit().setHookPrefix(invocationPrefix());
+			CleanupMode mode;
+			try {
+				mode = CleanupMode.valueOf(cleanup.toUpperCase(Locale.ROOT));
+			} catch (IllegalArgumentException invalid) {
+				throw die(CLIText.get().invalidCommitCleanupMode);
+			}
+			CommitCommand commitCmd = git.commit().setHookPrefix(invocationPrefix())
+					.setUseNativeMessageCleanup(true).setCleanupMode(mode)
+					.setDefaultClean(false).setAllowEmptyMessage(allowEmptyMessage);
 			if (author != null) {
 				PersonIdent parsed = RawParseUtils.parsePersonIdent(author);
 				if (parsed == null) {

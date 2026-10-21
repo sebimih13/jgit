@@ -317,6 +317,21 @@ public class CommitConfig {
 	 */
 	public static String cleanText(@NonNull String text,
 			@NonNull CleanupMode mode, char commentChar) {
+		return cleanText(text, mode, commentChar, false);
+	}
+
+	/**
+	 * Clean a message using either the existing text rules or native Git's
+	 * ASCII whitespace, column-zero comment and final-newline rules.
+	 * @param text message to process
+	 * @param mode resolved cleanup mode
+	 * @param commentChar comment marker for STRIP/SCISSORS
+	 * @param nativeRules whether to apply native byte-oriented cleanup rules
+	 * @return cleaned message
+	 * @since 7.8
+	 */
+	public static String cleanText(@NonNull String text,
+			@NonNull CleanupMode mode, char commentChar, boolean nativeRules) {
 		String toProcess = text;
 		boolean strip = false;
 		switch (mode) {
@@ -346,13 +361,22 @@ public class CommitConfig {
 		StringBuilder result = new StringBuilder();
 		boolean lastWasEmpty = true;
 		for (String line : toProcess.split("\n")) { //$NON-NLS-1$
-			line = line.stripTrailing();
+			if (nativeRules) {
+				int end = line.length();
+				while (end > 0 && isNativeWhitespace(line.charAt(end - 1))) {
+					end--;
+				}
+				line = line.substring(0, end);
+			} else {
+				line = line.stripTrailing();
+			}
 			if (line.isEmpty()) {
 				if (!lastWasEmpty) {
 					result.append('\n');
 					lastWasEmpty = true;
 				}
-			} else if (!strip || !isComment(line, commentChar)) {
+			} else if (!strip || !(nativeRules
+					? line.charAt(0) == commentChar : isComment(line, commentChar))) {
 				lastWasEmpty = false;
 				result.append(line).append('\n');
 			}
@@ -362,12 +386,42 @@ public class CommitConfig {
 			bufferSize--;
 			result.setLength(bufferSize);
 		}
-		if (bufferSize > 0 && !toProcess.endsWith("\n")) { //$NON-NLS-1$
+		if (!nativeRules && bufferSize > 0 && !toProcess.endsWith("\n")) { //$NON-NLS-1$
 			if (result.charAt(bufferSize - 1) == '\n') {
 				result.setLength(bufferSize - 1);
 			}
 		}
 		return result.toString();
+	}
+
+	/**
+	 * Check native Git's final-message emptiness rule, including sign-off-only
+	 * messages. VERBATIM permits any nonempty byte content.
+	 * @param text final message after cleanup
+	 * @param mode resolved cleanup mode
+	 * @return whether native commit considers the message empty
+	 * @since 7.8
+	 */
+	public static boolean isEmptyMessage(String text, CleanupMode mode) {
+		if (mode == CleanupMode.VERBATIM && !text.isEmpty()) {
+			return false;
+		}
+		for (String line : text.split("\n", -1)) { //$NON-NLS-1$
+			if (line.startsWith("Signed-off-by: ")) { //$NON-NLS-1$
+				continue;
+			}
+			for (int i = 0; i < line.length(); i++) {
+				if (!isNativeWhitespace(line.charAt(i))) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean isNativeWhitespace(char c) {
+		return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+				|| c == '\f' || c == '\u000b';
 	}
 
 	private static boolean isComment(String text, char commentChar) {
@@ -394,19 +448,49 @@ public class CommitConfig {
 	 * @since 6.2
 	 */
 	public static char determineCommentChar(String text) {
+		return determineCommentChar(text, false);
+	}
+
+	/**
+	 * Select an unused marker using existing rules or native Git's column-zero
+	 * selection, CR/LF boundaries and trailing comment/conflict cutoff.
+	 * @param text initial message file contents
+	 * @param nativeRules whether to use native selection rules
+	 * @return selected marker, or zero when all candidates are occupied
+	 * @since 7.8
+	 */
+	public static char determineCommentChar(String text, boolean nativeRules) {
 		if (StringUtils.isEmptyOrNull(text)) {
 			return '#';
 		}
 		final boolean[] inUse = new boolean[127];
-		for (String line : text.split("\n")) { //$NON-NLS-1$
-			int len = line.length();
-			for (int i = 0; i < len; i++) {
-				char ch = line.charAt(i);
-				if (!Character.isWhitespace(ch)) {
-					if (ch < inUse.length) {
-						inUse[ch] = true;
+		if (nativeRules) {
+			if (text.indexOf('#') < 0) {
+				return '#';
+			}
+			int end = nativeMessageEnd(text);
+			char first = text.charAt(0);
+			if (first < inUse.length) {
+				inUse[first] = true;
+			}
+			for (int i = 0; i + 1 < end; i++) {
+				char current = text.charAt(i);
+				char next = text.charAt(i + 1);
+				if ((current == '\n' || current == '\r') && next < inUse.length) {
+					inUse[next] = true;
+				}
+			}
+		} else {
+			for (String line : text.split("\n")) { //$NON-NLS-1$
+				int len = line.length();
+				for (int i = 0; i < len; i++) {
+					char ch = line.charAt(i);
+					if (!Character.isWhitespace(ch)) {
+						if (ch < inUse.length) {
+							inUse[ch] = true;
+						}
+						break;
 					}
-					break;
 				}
 			}
 		}
@@ -417,4 +501,41 @@ public class CommitConfig {
 		}
 		return (char) 0;
 	}
+	private static int nativeMessageEnd(String text) {
+		String cut = "#" + CUT; //$NON-NLS-1$
+		int cutoff = text.length();
+		if (text.startsWith(cut)) {
+			cutoff = 0;
+		} else {
+			int cutAt = text.indexOf('\n' + cut);
+			if (cutAt >= 0) {
+				cutoff = cutAt + 1;
+			}
+		}
+		int beginningOfComments = 0;
+		boolean inConflicts = false;
+		for (int start = 0; start < cutoff;) {
+			int newline = text.indexOf('\n', start);
+			int next = newline < 0 ? text.length() : newline + 1;
+			char first = text.charAt(start);
+			if (first == '#' || first == '\n') {
+				if (beginningOfComments == 0) {
+					beginningOfComments = start;
+				}
+			} else if (text.startsWith("Conflicts:\n", start)) { //$NON-NLS-1$
+				inConflicts = true;
+				if (beginningOfComments == 0) {
+					beginningOfComments = start;
+				}
+			} else if (inConflicts && first == '\t') {
+				// A pathname in the trailing legacy conflicts block.
+			} else if (beginningOfComments != 0) {
+				beginningOfComments = 0;
+				inConflicts = false;
+			}
+			start = next;
+		}
+		return beginningOfComments != 0 ? beginningOfComments : cutoff;
+	}
+
 }
