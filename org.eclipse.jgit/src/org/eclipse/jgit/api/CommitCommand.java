@@ -9,7 +9,11 @@
  */
 package org.eclipse.jgit.api;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.io.InputStream;
 import java.io.PrintStream;
 import java.text.MessageFormat;
@@ -248,22 +252,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						hookErrRedirect.get(PreCommitHook.NAME))).call();
 			}
 
-			String messageSource;
-			String messageSourceCommit = null;
-			if (message != null) {
-				messageSource = "message"; //$NON-NLS-1$
-			} else if (amend) {
-				messageSource = "commit"; //$NON-NLS-1$
-				messageSourceCommit = Constants.HEAD;
-			} else if (state == RepositoryState.MERGING_RESOLVED
-					|| state == RepositoryState.CHERRY_PICKING_RESOLVED
-					|| state == RepositoryState.REVERTING_RESOLVED
-					|| isMergeDuringRebase(state)) {
-				messageSource = "merge"; //$NON-NLS-1$
-			} else {
-				messageSource = "squash"; //$NON-NLS-1$
-			}
-			processOptions(state, rw);
+			MessageSource messageSource = processOptions(state, rw);
 
 			if (all && !repo.isBare()) {
 				try (Git git = new Git(repo)) {
@@ -345,7 +334,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						.prepareCommitMsg(repo,
 								hookOutRedirect.get(PrepareCommitMsgHook.NAME),
 								hookErrRedirect.get(PrepareCommitMsgHook.NAME))
-						.setMessageSource(messageSource, messageSourceCommit)
+						.setMessageSource(messageSource.source(), messageSource.commit())
 						.setCommitMessage(message)).call();
 
 				if (!noVerify) {
@@ -516,17 +505,17 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		case NO_CHANGE:
 		case FAST_FORWARD: {
 			setCallable(false);
+			File directory = repo.getDirectory();
+			if (!repo.isBare() && directory != null) {
+				unlinkMessageFile(directory.toPath().resolve(Constants.MERGE_MSG));
+				unlinkMessageFile(directory.toPath().resolve(Constants.SQUASH_MSG));
+			}
 			if (state == RepositoryState.MERGING_RESOLVED
 					|| isMergeDuringRebase(state)) {
-				// Commit was successful. Now delete the files
-				// used for merge commits
-				repo.writeMergeCommitMsg(null);
 				repo.writeMergeHeads(null);
 			} else if (state == RepositoryState.CHERRY_PICKING_RESOLVED) {
-				repo.writeMergeCommitMsg(null);
 				repo.writeCherryPickHead(null);
 			} else if (state == RepositoryState.REVERTING_RESOLVED) {
-				repo.writeMergeCommitMsg(null);
 				repo.writeRevertHead(null);
 			}
 			break;
@@ -539,6 +528,21 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			throw new JGitInternalException(MessageFormat.format(
 					JGitText.get().updatingRefFailed, Constants.HEAD,
 					commitId.toString(), rc));
+		}
+	}
+
+	private static void unlinkMessageFile(Path path) {
+		try {
+			// Native unlink never removes a directory or follows its symlink.
+			if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+				Files.deleteIfExists(path);
+			}
+		} catch (IOException e) {
+			// Publication already succeeded; cleanup must not fail the command.
+			if (log.isDebugEnabled()) {
+				log.debug(MessageFormat.format(JGitText.get().deleteFileFailed,
+						path), e);
+			}
 		}
 	}
 
@@ -742,13 +746,14 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 *            the state of the repository we are working on
 	 * @param rw
 	 *            the RevWalk to use
+	 * @return the source and optional commit argument for message preparation
 	 *
 	 * @throws NoMessageException
 	 *             if the commit message has not been specified
 	 * @throws UnsupportedSigningFormatException
 	 *             if the configured gpg.format is not supported
 	 */
-	private void processOptions(RepositoryState state, RevWalk rw)
+	private MessageSource processOptions(RepositoryState state, RevWalk rw)
 			throws NoMessageException, UnsupportedSigningFormatException {
 		if (committer == null)
 			committer = new PersonIdent(repo);
@@ -761,7 +766,30 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			// TODO(ch) align the defaults with native git
 			allowEmpty = only.isEmpty() ? Boolean.TRUE : Boolean.FALSE;
 
-		if (amend && message == null) {
+		boolean merging = state == RepositoryState.MERGING_RESOLVED
+				|| isMergeDuringRebase(state);
+		if (merging) {
+			try {
+				parents = repo.readMergeHeads();
+				if (parents != null) {
+					for (int i = 0; i < parents.size(); i++) {
+						RevObject parent = rw.parseAny(parents.get(i));
+						if (parent instanceof RevTag) {
+							parents.set(i, rw.peel(parent));
+						}
+					}
+				}
+			} catch (IOException e) {
+				throw new JGitInternalException(MessageFormat.format(
+						JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
+						Constants.MERGE_HEAD, e), e);
+			}
+		}
+
+		MessageSource source = new MessageSource(null, null);
+		if (message != null) {
+			source = new MessageSource("message", null); //$NON-NLS-1$
+		} else if (amend) {
 			try {
 				ObjectId head = repo.resolve(Constants.HEAD + "^{commit}"); //$NON-NLS-1$
 				if (head != null) {
@@ -770,59 +798,38 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			} catch (IOException e) {
 				throw new JGitInternalException(e.getMessage(), e);
 			}
-		}
-
-		// when doing a merge commit parse MERGE_HEAD and MERGE_MSG files
-		if (state == RepositoryState.MERGING_RESOLVED
-				|| isMergeDuringRebase(state)) {
-			try {
-				parents = repo.readMergeHeads();
-				if (parents != null)
-					for (int i = 0; i < parents.size(); i++) {
-						RevObject ro = rw.parseAny(parents.get(i));
-						if (ro instanceof RevTag)
-							parents.set(i, rw.peel(ro));
-					}
-			} catch (IOException e) {
-				throw new JGitInternalException(MessageFormat.format(
-						JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
-						Constants.MERGE_HEAD, e), e);
-			}
-			if (message == null) {
+			source = new MessageSource("commit", Constants.HEAD); //$NON-NLS-1$
+		} else {
+			String merge = null;
+			String squash = null;
+			if (!repo.isBare() && repo.getDirectory() != null) {
 				try {
-					message = repo.readMergeCommitMsg();
+					merge = repo.readMergeCommitMsg();
+					squash = repo.readSquashCommitMsg();
 				} catch (IOException e) {
-					throw new JGitInternalException(MessageFormat.format(
-							JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
-							Constants.MERGE_MSG, e), e);
+					throw new JGitInternalException(e.getMessage(), e);
 				}
 			}
-		} else if ((state == RepositoryState.CHERRY_PICKING_RESOLVED
-				|| state == RepositoryState.REVERTING_RESOLVED)
-				&& message == null) {
-			try {
-				message = repo.readMergeCommitMsg();
-			} catch (IOException e) {
-				throw new JGitInternalException(MessageFormat.format(
-						JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
-						Constants.MERGE_MSG, e), e);
+			if (merge != null) {
+				message = squash == null ? merge : squash + merge;
+				source = new MessageSource(
+						squash == null ? "merge" : "squash", null); //$NON-NLS-1$ //$NON-NLS-2$
+			} else if (squash != null) {
+				message = squash;
+				source = new MessageSource("squash", null); //$NON-NLS-1$
+			} else if (merging) {
+				source = new MessageSource("merge", null); //$NON-NLS-1$
+			} else if (state == RepositoryState.CHERRY_PICKING_RESOLVED) {
+				source = new MessageSource("commit", Constants.CHERRY_PICK_HEAD); //$NON-NLS-1$
 			}
-		} else if (state == RepositoryState.SAFE && message == null) {
-			try {
-				message = repo.readSquashCommitMsg();
-				if (message != null)
-					repo.writeSquashCommitMsg(null /* delete */);
-			} catch (IOException e) {
-				throw new JGitInternalException(MessageFormat.format(
-						JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
-						Constants.MERGE_MSG, e), e);
-			}
-
 		}
-		if (message == null)
-			// as long as we don't support -C option we have to have
-			// an explicit message
+		if (message == null && useNativeMessageCleanup) {
+			// A preparation hook may supply an initially empty message.
+			message = ""; //$NON-NLS-1$
+		}
+		if (message == null) {
 			throw new NoMessageException(JGitText.get().commitMessageNotSpecified);
+		}
 
 		if (gpgConfig == null) {
 			gpgConfig = new GpgConfig(repo.getConfig());
@@ -831,6 +838,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			signCommit = gpgConfig.isSignCommits() ? Boolean.TRUE
 					: Boolean.FALSE;
 		}
+		return source;
+	}
+
+	private record MessageSource(String source, String commit) {
 	}
 
 	private boolean isMergeDuringRebase(RepositoryState state) {

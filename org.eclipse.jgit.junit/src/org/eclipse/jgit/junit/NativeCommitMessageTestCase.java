@@ -86,7 +86,15 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 				"cherry-prepare-edit", "cherry-reject", "cherry-empty-message", "cherry-all-repository-message",
 				"revert-explicit", "revert-repository-message", "revert-prepare-edit", "revert-reject",
 				"revert-empty-message", "bypass-revert-repository-message", "amend-reuse",
-				"amend-reuse-edit", "amend-reuse-reject", "bypass-amend-reuse"
+				"amend-reuse-edit", "amend-reuse-reject", "bypass-amend-reuse",
+				"state-squash", "state-squash-reject", "state-squash-explicit",
+				"state-squash-merge", "state-squash-merge-no-lf", "state-merge-only",
+				"state-empty-fill", "state-empty-reject", "amend-reuse-squash",
+				"cherry-missing-message-fill", "cherry-missing-message-reject",
+				"revert-missing-message-fill", "revert-missing-message-reject",
+				"cleanup-squash-directory", "cleanup-merge-directory", "cleanup-squash-empty-directory",
+				"cleanup-merge-empty-directory", "cleanup-merge-directory-and-squash",
+				"cleanup-squash-symlink", "cleanup-squash-dangling", "cleanup-squash-file"
 				}).map(name -> new Object[] { name }).toList();
 	}
 
@@ -149,7 +157,8 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 		boolean reject = scenario.equals("failure");
 		boolean allowEmpty = scenario.endsWith("-allow");
 		boolean prepareEdit = scenario.equals("prepare-edit") || scenario.equals("cherry-prepare-edit")
-				|| scenario.equals("revert-prepare-edit") || scenario.equals("amend-reuse-edit");
+				|| scenario.equals("revert-prepare-edit") || scenario.equals("amend-reuse-edit")
+				|| scenario.endsWith("-fill");
 		boolean cherry = scenario.contains("cherry-");
 		boolean reverting = scenario.contains("revert-");
 		boolean amending = scenario.contains("amend-reuse");
@@ -161,6 +170,10 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 		boolean earlyReject = scenario.contains("auto-exhausted");
 		boolean invalidPrefix = scenario.startsWith("prefix-invalid-");
 		String prefixConfig = null;
+		boolean cleanupCase = scenario.startsWith("cleanup-");
+		boolean cleanupDirectory = cleanupCase && scenario.contains("directory");
+		String cleanupPath = scenario.startsWith("cleanup-merge") ? "MERGE_MSG" : "SQUASH_MSG";
+		String cleanupHook = "";
 		int hookCode = scenario.endsWith("failure") && !scenario.equals("post-failure") ? 7 : 0;
 		switch (scenario) {
 		case "edit-message": case "bypass-edit": replacement = "new message\n"; expected = bypass ? beforePrepare : replacement; break;
@@ -330,18 +343,67 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 			expected = prepareEdit ? "prepared\n" : beforePrepare;
 			if (scenario.equals("amend-reuse-reject")) { reject = true; hookCode = 7; }
 		}
+		if (scenario.startsWith("state-") && !scenario.equals("state-squash-explicit")) {
+			input = null;
+			messageSource = scenario.startsWith("state-empty-") ? null
+					: scenario.equals("state-merge-only") ? "merge" : "squash";
+			beforePrepare = scenario.startsWith("state-empty-") ? "" : "squash message\n";
+			if (scenario.equals("state-merge-only")) beforePrepare = "merge message\n";
+			if (scenario.equals("state-squash-merge")) beforePrepare += "merge message\n";
+			if (scenario.equals("state-squash-merge-no-lf")) beforePrepare = "squashmerge message\n";
+			beforeMessage = prepareEdit ? "prepared" : beforePrepare;
+			expected = prepareEdit ? "prepared\n" : beforePrepare;
+		}
+		if (scenario.startsWith("state-squash")) {
+			db.writeSquashCommitMsg(scenario.endsWith("no-lf") ? "squash" : "squash message\n");
+		}
+		if (scenario.contains("state-squash-merge") || scenario.equals("state-merge-only")) {
+			db.writeMergeCommitMsg("merge message\n");
+		}
+		if (scenario.equals("amend-reuse-squash")) db.writeSquashCommitMsg("unused squash message\n");
+		if (scenario.contains("missing-message")) {
+			db.writeMergeCommitMsg(null);
+			input = null;
+			messageSource = cherry ? "commit" : null;
+			messageCommit = cherry ? "CHERRY_PICK_HEAD" : null;
+			beforePrepare = "";
+			beforeMessage = prepareEdit ? "prepared" : "";
+			expected = prepareEdit ? "prepared\n" : "";
+		}
+		if (scenario.equals("state-squash-reject")) { reject = true; hookCode = 7; }
+		if (scenario.equals("state-empty-reject") || scenario.endsWith("missing-message-reject")) reject = true;
+		if (cleanupCase) {
+			String target = "\"$GIT_DIR/" + cleanupPath + "\"";
+			if (scenario.equals("cleanup-merge-directory-and-squash")) db.writeSquashCommitMsg("unused squash\n");
+			if (cleanupDirectory) {
+				cleanupHook = "mkdir " + target + "\n";
+				if (!scenario.contains("empty-directory")) cleanupHook += "printf keep >" + target + "/kept\n";
+			} else if (scenario.equals("cleanup-squash-symlink")) {
+				cleanupHook = "mkdir \"$GIT_DIR/cleanup-target\"\nprintf target >\"$GIT_DIR/cleanup-target/kept\"\n"
+						+ "ln -s cleanup-target " + target + "\n";
+			} else if (scenario.equals("cleanup-squash-dangling")) {
+				cleanupHook = "ln -s missing-target " + target + "\n";
+			} else {
+				cleanupHook = "printf unused >" + target + "\n";
+			}
+		}
 		if (prefixConfig != null) {
 			db.getConfig().fromText(db.getConfig().toText() + prefixConfig);
 		}
 		db.getConfig().save();
 		db.getConfig().load();
+		boolean hadSquash = Files.exists(path("SQUASH_MSG"));
+		boolean hadMerge = Files.exists(path("MERGE_MSG"));
+		byte[] squashBefore = hadSquash ? Files.readAllBytes(path("SQUASH_MSG")) : new byte[0];
+		byte[] mergeBefore = hadMerge ? Files.readAllBytes(path("MERGE_MSG")) : new byte[0];
 		hook("pre-commit", (cherry ? authorRecord("pre-commit") : "") + "test \"$#\" = 0\n"
 				+ (reverting ? "test \"$GIT_AUTHOR_NAME\" != 'Cherry Author' || exit 24\n" : "")
 				+ (scenario.equals("prefix-precommit-change") ? "git config core.commentString '!'\n" : ""));
 		hook("prepare-commit-msg", (cherry ? authorRecord("prepare-commit-msg") : "")
-				+ "test \"$#\" = " + (messageCommit == null ? "2" : "3")
-				+ " && test \"$2\" = " + messageSource + " || exit 21\n"
+				+ "test \"$#\" = " + (messageSource == null ? "1" : messageCommit == null ? "2" : "3") + " || exit 21\n"
+				+ (messageSource == null ? "" : "test \"$2\" = " + messageSource + " || exit 21\n")
 				+ (messageCommit == null ? "" : "test \"$3\" = " + messageCommit + " || exit 25\n")
+				+ (hadSquash ? "test -f \"$GIT_DIR/SQUASH_MSG\" || exit 26\n" : "")
 				+ "cp \"$1\" \"$GIT_DIR/prepare.input\"\n"
 				+ (prepareEdit ? "printf prepared >\"$1\"\n" : "")
 				+ (scenario.equals("auto-hook-config-change") ? "git config core.commentChar '!'\n" : "")
@@ -351,6 +413,7 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 			Path p = hook("commit-msg", (cherry ? authorRecord("commit-msg") : "") + "test \"$#\" = 1 || exit 22\n"
 					+ "cp \"$1\" \"$GIT_DIR/message.input\"\n"
 					+ (replacement != null ? "cat \"$GIT_DIR/replacement\" >\"$1\"\n" : "")
+					+ cleanupHook
 					+ "exit " + hookCode + "\n");
 			assertTrue(FS.DETECTED.setExecute(p.toFile(), executable));
 		}
@@ -395,7 +458,7 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 			for (String phase : phases.split("\n")) records.append(phase).append(identity);
 			assertEquals(records.toString(), Files.readString(path("cherry-author")));
 			assertEquals(reject, Files.exists(path("CHERRY_PICK_HEAD")));
-			assertEquals(reject, Files.exists(path("MERGE_MSG")));
+			assertEquals(reject && hadMerge, Files.exists(path("MERGE_MSG")));
 			if (!reject) {
 				assertNotNull(result);
 				assertEquals(cherryAuthor.toExternalString(), result.getAuthorIdent().toExternalString());
@@ -417,8 +480,22 @@ public abstract class NativeCommitMessageTestCase extends RepositoryTestCase {
 		}
 		if (reverting) {
 			assertEquals(reject, Files.exists(path("REVERT_HEAD")));
-			assertEquals(reject, Files.exists(path("MERGE_MSG")));
+			assertEquals(reject && hadMerge, Files.exists(path("MERGE_MSG")));
 		}
+		if (cleanupCase) {
+			assertEquals(cleanupDirectory, Files.exists(path(cleanupPath), java.nio.file.LinkOption.NOFOLLOW_LINKS));
+			if (cleanupDirectory) {
+				assertTrue(Files.isDirectory(path(cleanupPath)));
+				if (!scenario.contains("empty-directory")) assertEquals("keep", Files.readString(path(cleanupPath + "/kept")));
+			}
+			if (scenario.equals("cleanup-squash-symlink")) assertEquals("target", Files.readString(path("cleanup-target/kept")));
+			assertFalse(Files.exists(path(cleanupPath.equals("MERGE_MSG") ? "SQUASH_MSG" : "MERGE_MSG")));
+		} else {
+			assertEquals(reject && hadSquash, Files.exists(path("SQUASH_MSG")));
+			assertEquals(reject && hadMerge, Files.exists(path("MERGE_MSG")));
+		}
+		if (reject && hadSquash) assertArrayEquals(squashBefore, Files.readAllBytes(path("SQUASH_MSG")));
+		if (reject && hadMerge) assertArrayEquals(mergeBefore, Files.readAllBytes(path("MERGE_MSG")));
 	}
 
 	private String authorRecord(String phase) {
