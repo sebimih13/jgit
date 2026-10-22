@@ -58,6 +58,12 @@
           <include>plugin.properties</include>
         </includes>
       </resource>
+      <resource>
+        <directory>src</directory>
+        <includes>
+          <include>org/eclipse/jgit/junit/untracked-cache/*.txt</include>
+        </includes>
+      </resource>
     </resources>
 
     <plugins>

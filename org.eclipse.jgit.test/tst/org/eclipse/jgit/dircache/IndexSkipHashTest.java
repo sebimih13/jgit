@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.errors.CorruptObjectException;
+import org.eclipse.jgit.junit.NativeIndexVersionSupport;
 import org.eclipse.jgit.junit.RepositoryTestCase;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Repository;
@@ -81,6 +82,7 @@ public class IndexSkipHashTest extends RepositoryTestCase {
 		add("1");
 		footer(db, true);
 		assertEquals(1, db.readDirCache().getEntryCount());
+		NativeIndexVersionSupport.assertNativeFsck(db);
 	}
 
 	@Test
@@ -167,6 +169,7 @@ public class IndexSkipHashTest extends RepositoryTestCase {
 				footer(child, true);
 				footer(db, false);
 				assertEquals(1, child.readDirCache().getEntryCount());
+				NativeIndexVersionSupport.assertNativeFsck(child);
 			}
 		}
 	}

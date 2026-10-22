@@ -31,6 +31,7 @@ import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.internal.storage.file.UntrackedCache.Directory;
 import org.eclipse.jgit.junit.RepositoryTestCase;
+import org.eclipse.jgit.junit.NativeUntrackedCacheSnapshots;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.junit.Test;
@@ -244,6 +245,51 @@ public class UntrackedCacheTest extends RepositoryTestCase {
 				UntrackedCache.read(raw);
 			} catch (java.io.IOException expected) {
 				// Corrupt optional data is rejected with a checked failure.
+			}
+		}
+	}
+
+	@Test
+	public void rootIndexInvalidationMatchesOriginalNativeIntermediateDumps()
+			throws Exception {
+		// t7063: rm --cached two, and then add two. Both invalidate only
+		// the root listing, retaining the unaffected directory summaries.
+		for (int[] transition : new int[][] { { 20, 21 }, { 23, 24 } }) {
+			NativeUntrackedCacheSnapshots.install(db, transition[0]);
+			UntrackedCache cache = DirCache.read(db).getUntrackedCache();
+			cache.invalidatePath(Constants.encode("two"));
+			assertEquals(1, cache.dirInvalidated);
+			NativeUntrackedCacheSnapshots.assertNativeDump(cache, transition[1]);
+			NativeUntrackedCacheSnapshots.assertNativeDump(
+					UntrackedCache.read(cache.write()), transition[1]);
+		}
+	}
+
+	@Test
+	public void originalNativeDumpCheckpointsSurviveIndexRewrite()
+			throws Exception {
+		for (int checkpoint : NativeUntrackedCacheSnapshots.checkpoints()) {
+			NativeUntrackedCacheSnapshots.install(db, checkpoint);
+			DirCache original = DirCache.read(db);
+			DirCache rewritten = db.lockDirCache();
+			try {
+				rewritten.write();
+				assertTrue(rewritten.commit());
+			} finally {
+				rewritten.unlock();
+			}
+			NativeUntrackedCacheSnapshots.assertStored(db, checkpoint);
+			DirCache actual = DirCache.read(db);
+			assertEquals(original.getEntryCount(), actual.getEntryCount());
+			for (int i = 0; i < original.getEntryCount(); i++) {
+				var before = original.getEntry(i);
+				var after = actual.getEntry(i);
+				assertArrayEquals(before.getRawPath(), after.getRawPath());
+				assertEquals(before.getObjectId(), after.getObjectId());
+				assertEquals(before.getStage(), after.getStage());
+				assertEquals(before.getRawMode(), after.getRawMode());
+				assertEquals(before.isSkipWorkTree(), after.isSkipWorkTree());
+				assertEquals(before.isAssumeValid(), after.isAssumeValid());
 			}
 		}
 	}

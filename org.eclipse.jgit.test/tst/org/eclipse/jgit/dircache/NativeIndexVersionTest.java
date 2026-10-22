@@ -38,8 +38,10 @@ public class NativeIndexVersionTest extends RepositoryTestCase {
 				expectedVersion, manyFiles);
 		mockSystemReader.setProperty("GIT_INDEX_VERSION",
 				environmentVersion);
-		try (Git git = Git.wrap(db)) {
+		try (var warnings = NativeIndexVersionSupport.captureWarnings();
+				Git git = Git.wrap(db)) {
 			git.add().addFilepattern("a").call();
+			warnings.assertInitial(configuredVersion, environmentVersion);
 		}
 		NativeIndexVersionSupport.assertMatches(db, nativeIndex, expectedVersion, manyFiles);
 		// t1600: invalid defaults must not affect an existing index.
@@ -48,8 +50,10 @@ public class NativeIndexVersionTest extends RepositoryTestCase {
 		mockSystemReader.setProperty("GIT_INDEX_VERSION", "1");
 		writeTrashFile("a", "restaged content\n");
 		NativeIndexVersionSupport.nativeRestage(db, expectedVersion, manyFiles);
-		try (Git git = Git.wrap(db)) {
+		try (var warnings = NativeIndexVersionSupport.captureWarnings();
+				Git git = Git.wrap(db)) {
 			git.add().addFilepattern("a").call();
+			warnings.assertNone();
 		}
 		NativeIndexVersionSupport.assertMatches(db, nativeIndex, expectedVersion, manyFiles);
 	}
