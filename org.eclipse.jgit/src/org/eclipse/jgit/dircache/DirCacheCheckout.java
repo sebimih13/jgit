@@ -113,6 +113,8 @@ public class DirCacheCheckout {
 
 	private Map<String, CheckoutMetadata> updated = new LinkedHashMap<>();
 
+	private final Set<byte[]> untrackedCacheInvalidations = new HashSet<>();
+
 	private Set<String> existing;
 
 	private ArrayList<String> conflicts = new ArrayList<>();
@@ -315,6 +317,7 @@ public class DirCacheCheckout {
 		}
 		removed.clear();
 		updated.clear();
+		untrackedCacheInvalidations.clear();
 		conflicts.clear();
 		walk = new NameConflictTreeWalk(repo);
 		builder = dc.builder();
@@ -355,6 +358,7 @@ public class DirCacheCheckout {
 		}
 		removed.clear();
 		updated.clear();
+		untrackedCacheInvalidations.clear();
 		conflicts.clear();
 
 		builder = dc.builder();
@@ -534,6 +538,20 @@ public class DirCacheCheckout {
 					throw new CheckoutConflictException(conflicts.toArray(new String[0]));
 				}
 				cleanUpConflicts();
+			}
+
+			// Native unpack-trees invalidates existing paths whose object ID or
+			// mode changes, unlike an index-only entry replacement. Apply only
+			// after conflict checks, before the new index is published.
+			if (dc.getUntrackedCache() != null) {
+				for (byte[] path : untrackedCacheInvalidations) {
+					try {
+						dc.getUntrackedCache().invalidatePath(path);
+					} catch (IOException unsafePath) {
+						dc.getUntrackedCache().invalidateAll();
+						break;
+					}
+				}
 			}
 
 			// update our index
@@ -1255,6 +1273,15 @@ public class DirCacheCheckout {
 	private void update(int index, String path, ObjectId mId,
 			FileMode mode) throws IOException {
 		if (!FileMode.TREE.equals(mode)) {
+			if (dc.getUntrackedCache() != null
+					&& dc.getUntrackedCache().root != null) {
+				DirCacheEntry old = dc.getEntry(path);
+				if (old != null && old.getStage() == DirCacheEntry.STAGE_0
+						&& (old.getRawMode() != mode.getBits()
+								|| mId.compareTo(old.idBuffer(), old.idOffset()) != 0)) {
+					untrackedCacheInvalidations.add(old.path);
+				}
+			}
 			updated.put(path, new CheckoutMetadata(
 					walk.getCheckoutEolStreamType(index),
 					walk.getSmudgeCommand(index)));

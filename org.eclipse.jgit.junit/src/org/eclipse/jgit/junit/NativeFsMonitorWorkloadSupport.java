@@ -9,11 +9,13 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -30,6 +32,202 @@ import org.eclipse.jgit.lib.Repository;
  * @since 7.8
  */
 public final class NativeFsMonitorWorkloadSupport {
+	/**
+	 * Boolean and fallback forms accepted by native repo-settings.c/parse.c.
+	 */
+	public static final List<String> UNTRACKED_SETTINGS = java.util.Arrays
+			.asList(null, "keep", "unexpected", "true", "false", "YES", "off",
+					"", "2", "-1", "+2", "0x10", "010", "08", "1k", "0g", "2g",
+					"-2147483648", "2147483647", "2147483648", " 1", "1 ", " 0",
+					" ", "1 k");
+
+	/**
+	 * Prepare an independently written native index, install its initial state
+	 * in the Java fixture, and ask C Git whether the requested policy retains
+	 * UNTR. Neither native command uses the Java index as its output.
+	 *
+	 * @param repository
+	 *            disposable fixture
+	 * @param manyFiles
+	 *            feature default
+	 * @param setting
+	 *            explicit setting, or null for the default
+	 * @param existing
+	 *            whether the initial index contains UNTR
+	 * @return native extension presence after applying the configuration
+	 * @throws Exception
+	 *             on native command or index decoding failure
+	 */
+	public static boolean nativeUntrackedCachePolicy(Repository repository,
+			boolean manyFiles, String setting, boolean existing)
+			throws Exception {
+		Path index = repository.getDirectory().toPath()
+				.resolve("native-untracked-policy.index");
+		Files.deleteIfExists(index);
+		nativeGit(repository, index, true, "-c",
+				"core.untrackedCache=" + existing, "update-index",
+				"--index-version=2");
+		Files.copy(index, repository.getIndexFile().toPath(),
+				StandardCopyOption.REPLACE_EXISTING);
+		return nativeUntrackedCacheRewrite(repository, manyFiles, setting);
+	}
+
+	/**
+	 * Apply a native policy to a private copy of the current Java fixture index.
+	 *
+	 * @param repository disposable fixture
+	 * @param manyFiles feature default
+	 * @param setting explicit policy, or null for its default
+	 * @return native extension presence
+	 * @throws Exception on native or decoding failure
+	 */
+	public static boolean nativeUntrackedCacheRewrite(Repository repository,
+			boolean manyFiles, String setting) throws Exception {
+		return nativeUntrackedCacheRewrite(repository,
+				Boolean.toString(manyFiles), setting);
+	}
+
+	/**
+	 * Apply a native policy with a raw feature boolean for parser parity tests.
+	 *
+	 * @param repository disposable fixture
+	 * @param manyFiles native feature.manyFiles boolean spelling
+	 * @param setting explicit untracked policy, or null for its default
+	 * @return native extension presence
+	 * @throws Exception on native or decoding failure
+	 */
+	public static boolean nativeUntrackedCacheRewrite(Repository repository,
+			String manyFiles, String setting) throws Exception {
+		Path index = repository.getDirectory().toPath()
+				.resolve("native-untracked-policy.index");
+		Files.copy(repository.getIndexFile().toPath(), index,
+				StandardCopyOption.REPLACE_EXISTING);
+		// An absent value and 'keep' both leave the feature default intact.
+		// Override the runner's defensive core.untrackedCache=false setting.
+		// Force a write: changing only skipHash does not otherwise mark the
+		// native index dirty, while the Java operation explicitly writes it.
+		nativeGit(repository, index, true, "-c",
+				"feature.manyFiles=" + manyFiles, "-c",
+				"core.untrackedCache=" + (setting == null ? "keep" : setting),
+				"update-index", "--index-version=2", "--force-write-index");
+		return DirCache.read(index.toFile(), repository.getFS())
+				.getUntrackedCache() != null;
+	}
+
+	/**
+	 * Compare the complete stored UNTR payload after a Java index write with
+	 * the independent native policy oracle's output.
+	 *
+	 * @param repository disposable fixture used by nativeUntrackedCachePolicy
+	 * @throws Exception on an index or assertion failure
+	 */
+	public static void assertNativeUntrackedCachePolicy(Repository repository)
+			throws Exception {
+		DirCache expected = DirCache.read(repository.getDirectory().toPath()
+				.resolve("native-untracked-policy.index").toFile(), repository.getFS());
+		DirCache actual = DirCache.read(repository.getIndexFile(), repository.getFS());
+		assertEquals("Native UNTR extension presence",
+				expected.getUntrackedCache() != null, actual.getUntrackedCache() != null);
+		if (expected.getUntrackedCache() != null) {
+			assertArrayEquals("Complete native UNTR policy payload",
+					storedPolicyPayload(repository.getDirectory().toPath()
+							.resolve("native-untracked-policy.index")),
+					storedPolicyPayload(repository.getIndexFile().toPath()));
+		}
+		if (expected.getEntryCount() == 0 && actual.getEntryCount() == 0) {
+			assertArrayEquals("Complete empty native index including footer",
+					Files.readAllBytes(repository.getDirectory().toPath()
+							.resolve("native-untracked-policy.index")),
+					Files.readAllBytes(repository.getIndexFile().toPath()));
+		}
+	}
+
+	private static byte[] storedPolicyPayload(Path index) throws Exception {
+		byte[] raw = Files.readAllBytes(index);
+		ByteBuffer data = ByteBuffer.wrap(raw);
+		// The policy oracle explicitly selects v2. Decode only this fixture
+		// layout, so the assertion compares stored bytes rather than passing
+		// both payloads through the model serializer under test.
+		assertEquals("Policy fixture index version", 2, data.getInt(4));
+		int offset = 12;
+		for (int i = 0; i < data.getInt(8); i++) {
+			int start = offset;
+			offset += 62;
+			while (raw[offset++] != 0) {
+				// Skip the NUL-terminated pathname and then its v2 padding.
+			}
+			offset = start + ((offset - start + 7) & ~7);
+		}
+		while (offset < raw.length - 20) {
+			int signature = data.getInt(offset);
+			int size = data.getInt(offset + 4);
+			offset += 8;
+			assertTrue("Bound policy fixture extension", size >= 0
+					&& size <= raw.length - 20 - offset);
+			if (signature == 0x554e5452) { // UNTR
+				return Arrays.copyOfRange(raw, offset, offset + size);
+			}
+			offset += size;
+		}
+		throw new AssertionError("Expected stored UNTR payload");
+	}
+
+	/**
+	 * Run a native index mutation on a private copy, retaining the imported
+	 * cache identity and traversal flags for byte comparisons.
+	 *
+	 * @param repository disposable fixture
+	 * @param input input for --index-info, or null
+	 * @param arguments update-index options
+	 * @throws Exception on a command or index failure
+	 */
+	public static void nativeUntrackedIndexMutation(Repository repository,
+			byte[] input, String... arguments) throws Exception {
+		Path index = repository.getDirectory().toPath()
+				.resolve("native-untracked-policy.index");
+		Files.copy(repository.getIndexFile().toPath(), index,
+				StandardCopyOption.REPLACE_EXISTING);
+		List<String> options = new ArrayList<>(List.of("-c",
+				"feature.manyFiles=false", "-c", "core.untrackedCache=keep",
+				"update-index", "--force-write-index"));
+		options.addAll(List.of(arguments));
+		nativeGit(repository, index, true, input, options.toArray(String[]::new));
+	}
+
+	/**
+	 * Run the native index-only unpack-trees operation used to compare checkout
+	 * invalidation without changing the Java fixture's worktree or HEAD.
+	 *
+	 * @param repository disposable fixture
+	 * @param tree target tree object ID
+	 * @throws Exception on native failure
+	 */
+	public static void nativeUntrackedReadTree(Repository repository, ObjectId tree)
+			throws Exception {
+		Path index = repository.getDirectory().toPath().resolve("native-untracked-policy.index");
+		Files.copy(repository.getIndexFile().toPath(), index, StandardCopyOption.REPLACE_EXISTING);
+		nativeGit(repository, index, true, "-c", "feature.manyFiles=false", "-c",
+				"core.untrackedCache=keep", "read-tree", "--reset", tree.name());
+	}
+
+	/**
+	 * Verify that native checkout rejects the dirty fixture before changing HEAD.
+	 *
+	 * @param repository disposable fixture with local modifications
+	 * @param target target commit
+	 * @throws Exception on an unexpected native result
+	 */
+	public static void nativeUntrackedCheckoutRejected(Repository repository, ObjectId target)
+			throws Exception {
+		Path index = repository.getDirectory().toPath().resolve("native-untracked-policy.index");
+		Files.copy(repository.getIndexFile().toPath(), index, StandardCopyOption.REPLACE_EXISTING);
+		byte[] head = Files.readAllBytes(repository.getDirectory().toPath().resolve("HEAD"));
+		nativeGit(repository, index, true, null, 1, "-c", "feature.manyFiles=false",
+				"-c", "core.untrackedCache=keep", "checkout", "--detach", target.name());
+		assertArrayEquals("Rejected native checkout preserves HEAD", head,
+				Files.readAllBytes(repository.getDirectory().toPath().resolve("HEAD")));
+	}
+
 	/** Original empty and populated pathspec directories. */
 	public static final List<String> PATHS = List.of("1_file", "10_files",
 			"100_files", "1000_files", "10000_files");
@@ -184,6 +382,16 @@ public final class NativeFsMonitorWorkloadSupport {
 
 	private static byte[] nativeGit(Repository repository, Path index,
 			boolean allowIndexRefresh, String... arguments) throws Exception {
+		return nativeGit(repository, index, allowIndexRefresh, null, arguments);
+	}
+
+	private static byte[] nativeGit(Repository repository, Path index,
+			boolean allowIndexRefresh, byte[] input, String... arguments) throws Exception {
+		return nativeGit(repository, index, allowIndexRefresh, input, 0, arguments);
+	}
+
+	private static byte[] nativeGit(Repository repository, Path index,
+			boolean allowIndexRefresh, byte[] input, int expectedExit, String... arguments) throws Exception {
 		List<String> command = new ArrayList<>(List.of(
 				System.getProperty("jgit.test.gitExecutable", "git"),
 				"-c", "core.fsmonitor=false", "-c",
@@ -212,10 +420,14 @@ public final class NativeFsMonitorWorkloadSupport {
 		}
 		Process process = builder.start();
 		try {
+			try (var stdin = process.getOutputStream()) {
+				if (input != null)
+					stdin.write(input);
+			}
 			assertTrue("Native workload timeout", process.waitFor(20, TimeUnit.SECONDS));
 			assertTrue("Bound native output", Files.size(output) <= 1024 * 1024);
 			assertTrue("Bound native errors", Files.size(errors) <= 1024 * 1024);
-			assertEquals(Files.readString(errors), 0, process.exitValue());
+			assertEquals(Files.readString(errors), expectedExit, process.exitValue());
 			return Files.readAllBytes(output);
 		} finally {
 			if (process.isAlive()) {

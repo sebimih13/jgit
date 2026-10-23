@@ -29,6 +29,45 @@ import org.junit.Test;
 
 public class FsMonitorTest extends RepositoryTestCase {
 	@Test
+	public void untrackedCachePolicyMatchesNativeConfigurationAndReuse()
+			throws Exception {
+		configure(null);
+		reply("unchanged\0");
+		writeTrashFile("loose", "untracked");
+		try (Git git = Git.wrap(db)) {
+			for (boolean manyFiles : new boolean[] { false, true }) {
+				for (boolean existing : new boolean[] { false, true }) {
+					for (String value : org.eclipse.jgit.junit.NativeFsMonitorWorkloadSupport.UNTRACKED_SETTINGS) {
+						boolean expected = org.eclipse.jgit.junit.NativeFsMonitorWorkloadSupport
+								.nativeUntrackedCachePolicy(db, manyFiles,
+										value, existing);
+						db.getConfig().setBoolean("feature", null, "manyFiles",
+								manyFiles);
+						if (value == null)
+							db.getConfig().unset("core", null,
+									"untrackedCache");
+						else
+							db.getConfig().setString("core", null,
+									"untrackedCache", value);
+						String row = "manyFiles=" + manyFiles + ", existing="
+								+ existing + ", value=" + value;
+						assertEquals(row, expected,
+								FsMonitor.isUntrackedCacheEnabled(db, null));
+						Status first = git.status().call();
+						Status second = git.status().call();
+						assertEquals(row, Set.of("loose"),
+								second.getUntracked());
+						if (expected)
+							assertSame(row, first, second);
+						else
+							assertNotSame(row, first, second);
+					}
+				}
+			}
+		}
+	}
+
+	@Test
 	public void removedHookStillChecksContentsAfterSuccessfulMonitoring()
 			throws Exception {
 		unavailableHookChecksContents("missing");
@@ -1414,6 +1453,9 @@ public class FsMonitorTest extends RepositoryTestCase {
 			writeTrashFile("tracked", "base");
 			git.add().addFilepattern("tracked").call();
 			git.commit().setMessage("base").call();
+			// Staging with core.untrackedCache=true now creates UNTR. This
+			// test exercises keep/unset with no stored extension.
+			setNativeUntrackedCache(false);
 			for (String setting : new String[] { "false", "keep", "unset" }) {
 				if ("unset".equals(setting)) {
 					db.getConfig().unset("core", null, "untrackedCache");

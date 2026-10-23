@@ -45,6 +45,7 @@ import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.storage.file.FileSnapshot;
 import org.eclipse.jgit.internal.storage.file.LockFile;
 import org.eclipse.jgit.internal.storage.file.UntrackedCache;
+import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.internal.storage.io.NullMessageDigest;
 import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.Config;
@@ -318,6 +319,10 @@ public class DirCache {
 
 	private UntrackedCache untrackedCache;
 
+	private boolean untrackedCacheExplicit;
+
+	private UntrackedCacheIndexState untrackedCacheIndexState;
+
 	/** Our active lock (if we hold it); null if we don't have it locked. */
 	private LockFile myLock;
 
@@ -402,21 +407,53 @@ public class DirCache {
 
 	/**
 	 * Replace the optional untracked-cache extension.
+	 * This explicit selection overrides configuration for subsequent writes of
+	 * this in-memory index, until it is cleared or reloaded.
 	 *
 	 * @param cache validated cache data, or null to omit the extension
 	 * @since 7.8
 	 */
 	public void setUntrackedCache(UntrackedCache cache) {
 		untrackedCache = cache;
+		untrackedCacheExplicit = true;
+		rememberUntrackedCacheIndexState();
 	}
 
 	void replace(DirCacheEntry[] e, int cnt) {
-		if (untrackedCache != null) {
-			untrackedCache.invalidateAll();
-		}
+		invalidateUntrackedCache(e, cnt);
 		sortedEntries = e;
 		entryCnt = cnt;
 		tree = null;
+		rememberUntrackedCacheIndexState();
+	}
+
+	private void invalidateUntrackedCache(DirCacheEntry[] entries, int count) {
+		if (untrackedCache == null || untrackedCache.root == null) {
+			return;
+		}
+		if (untrackedCacheIndexState == null) {
+			// A caller may populate an initially empty cache through its model.
+			// Without an index baseline, no directory validity can be retained.
+			untrackedCache.invalidateAll();
+			return;
+		}
+		try {
+			untrackedCacheIndexState.invalidate(untrackedCache, entries, count);
+		} catch (IOException unsafePath) {
+			// Optional cache data must not prevent an otherwise supported edit.
+			untrackedCache.invalidateAll();
+		}
+	}
+
+	private void rememberUntrackedCacheIndexState() {
+		if (untrackedCache == null || untrackedCache.root == null) {
+			untrackedCacheIndexState = null;
+			return;
+		}
+		if (untrackedCacheIndexState == null) {
+			untrackedCacheIndexState = new UntrackedCacheIndexState();
+		}
+		untrackedCacheIndexState.remember(sortedEntries, entryCnt);
 	}
 
 	/**
@@ -477,6 +514,8 @@ public class DirCache {
 	 */
 	public void clear() {
 		untrackedCache = null;
+		untrackedCacheExplicit = false;
+		untrackedCacheIndexState = null;
 		snapshot = null;
 		sortedEntries = NO_ENTRIES;
 		entryCnt = 0;
@@ -608,6 +647,7 @@ public class DirCache {
 			throw new CorruptObjectException(
 					JGitText.get().DIRCChecksumMismatch);
 		}
+		rememberUntrackedCacheIndexState();
 	}
 
 	private void skipOptionalExtension(final InputStream in,
@@ -771,7 +811,7 @@ public class DirCache {
 		os.close();
 	}
 
-	private void readConfig() {
+	private void readConfig() throws IOException {
 		if (repository != null) {
 			DirCacheConfig config = repository.getConfig()
 					.get(DirCacheConfig::new);
@@ -779,7 +819,16 @@ public class DirCache {
 				version = config.getIndexVersion();
 			}
 			skipHash = config.isSkipHash();
+			if (!untrackedCacheExplicit) {
+				untrackedCache = repository.getConfig()
+						.get(UntrackedCacheConfig.KEY)
+						.applyTo(repository, untrackedCache);
+			}
 		}
+		// DirCacheEntry is mutable. Also cover direct stage changes followed
+		// by write(), including edits that did not use a builder or editor.
+		invalidateUntrackedCache(sortedEntries, entryCnt);
+		rememberUntrackedCacheIndexState();
 	}
 
 	private MessageDigest newMessageDigest() {
@@ -1199,6 +1248,60 @@ public class DirCache {
 		}
 	}
 
+	private static final class UntrackedCacheIndexState {
+		private DirCacheEntry[] entries;
+
+		private byte[] stages;
+
+		private int count;
+
+		void remember(DirCacheEntry[] current, int currentCount) {
+			// Paths are immutable, but stage bits can change on the same entry
+			// object. Retain the existing array and copy only one byte per entry.
+			entries = current;
+			count = currentCount;
+			if (stages == null || stages.length < count) {
+				stages = new byte[count];
+			}
+			for (int i = 0; i < count; i++) {
+				stages[i] = (byte) current[i].getStage();
+			}
+		}
+
+		void invalidate(UntrackedCache cache, DirCacheEntry[] next, int nextCount)
+				throws IOException {
+			int oldPos = 0;
+			int newPos = 0;
+			while (oldPos < count || newPos < nextCount) {
+				if (oldPos == count) {
+					cache.invalidatePath(next[newPos++].path);
+				} else if (newPos == nextCount) {
+					cache.invalidatePath(entries[oldPos++].path);
+				} else {
+					DirCacheEntry oldEntry = entries[oldPos];
+					DirCacheEntry newEntry = next[newPos];
+					int cmp = oldEntry.path == newEntry.path ? 0
+							: DirCache.cmp(oldEntry, newEntry);
+					if (cmp == 0) {
+						cmp = stages[oldPos] - newEntry.getStage();
+					}
+					if (cmp < 0) {
+						cache.invalidatePath(oldEntry.path);
+						oldPos++;
+					} else if (cmp > 0) {
+						cache.invalidatePath(newEntry.path);
+						newPos++;
+					} else {
+						// Native replace_index_entry does not invalidate UNTR
+						// for changes to the object ID, mode or stat metadata.
+						oldPos++;
+						newPos++;
+					}
+				}
+			}
+		}
+	}
+
 	private static class DirCacheConfig {
 
 		private final Config config;
@@ -1209,9 +1312,7 @@ public class DirCache {
 
 		public DirCacheConfig(Config cfg) {
 			config = cfg;
-			manyFiles = cfg.getBoolean(
-					ConfigConstants.CONFIG_FEATURE_SECTION,
-					ConfigConstants.CONFIG_KEY_MANYFILES, false);
+			manyFiles = cfg.get(UntrackedCacheConfig.KEY).isManyFiles();
 			skipHash = cfg.getBoolean(ConfigConstants.CONFIG_INDEX_SECTION,
 					ConfigConstants.CONFIG_KEY_SKIPHASH, manyFiles);
 		}

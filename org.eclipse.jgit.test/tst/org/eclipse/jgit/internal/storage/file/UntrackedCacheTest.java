@@ -24,20 +24,366 @@ import java.io.DataOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheEditor;
+import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.internal.storage.file.UntrackedCache.Directory;
 import org.eclipse.jgit.junit.RepositoryTestCase;
+import org.eclipse.jgit.junit.NativeFsMonitorWorkloadSupport;
 import org.eclipse.jgit.junit.NativeUntrackedCacheSnapshots;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectId;
 import org.junit.Test;
 
 public class UntrackedCacheTest extends RepositoryTestCase {
+	@Test
+	public void unchangedCheckoutPreservesNativeCache() throws Exception {
+		for (String mode : List.of("normal", "all")) {
+			var scenario = org.eclipse.jgit.junit.NativeUntrackedCheckoutSupport.prepare(db, mode, "two");
+			NativeFsMonitorWorkloadSupport.nativeUntrackedReadTree(db, scenario.base().getTree());
+			try (Git git = Git.wrap(db)) {
+				git.checkout().setName(scenario.base().name()).call();
+			}
+			NativeFsMonitorWorkloadSupport.assertNativeUntrackedCachePolicy(db);
+			assertTrue(db.readDirCache().getUntrackedCache().root.valid);
+			assertEquals(scenario.base(), db.resolve("HEAD"));
+			assertEquals("base\n", Files.readString(db.getWorkTree().toPath().resolve("two")));
+		}
+	}
+
+	@Test
+	public void rejectedCheckoutPreservesIndexAndUserChanges() throws Exception {
+		for (String mode : List.of("normal", "all")) {
+			for (String path : List.of("two", "sub/tracked")) {
+				var scenario = org.eclipse.jgit.junit.NativeUntrackedCheckoutSupport.prepare(db, mode, path);
+				byte[] index = Files.readAllBytes(db.getIndexFile().toPath());
+				Files.writeString(db.getWorkTree().toPath().resolve(path), "user\n");
+				NativeFsMonitorWorkloadSupport.nativeUntrackedCheckoutRejected(db, scenario.target());
+				try (Git git = Git.wrap(db)) {
+					assertThrows(org.eclipse.jgit.api.errors.CheckoutConflictException.class,
+							() -> git.checkout().setName(scenario.target().name()).call());
+				}
+				assertArrayEquals("Rejected checkout preserves complete index", index,
+						Files.readAllBytes(db.getIndexFile().toPath()));
+				assertEquals(scenario.base(), db.resolve("HEAD"));
+				assertEquals("user\n", Files.readString(db.getWorkTree().toPath().resolve(path)));
+			}
+		}
+	}
+
+	@Test
+	public void branchCheckoutMatchesNativeUnpackTreeInvalidation() throws Exception {
+		for (String mode : List.of("normal", "all")) {
+			for (String path : List.of("two", "sub/tracked")) {
+				var scenario = org.eclipse.jgit.junit.NativeUntrackedCheckoutSupport.prepare(db, mode, path);
+				NativeFsMonitorWorkloadSupport.nativeUntrackedReadTree(db, scenario.target().getTree());
+				try (Git git = Git.wrap(db)) {
+					git.checkout().setName(scenario.target().name()).call();
+				}
+				org.eclipse.jgit.junit.NativeUntrackedCheckoutSupport.assertResult(db, scenario, true);
+			}
+		}
+	}
+
+	@Test
+	public void pathCheckoutRetainsNativeIndexReplacementCache() throws Exception {
+		for (String mode : List.of("normal", "all")) {
+			var scenario = org.eclipse.jgit.junit.NativeUntrackedCheckoutSupport.prepare(db, mode, "two");
+			try (var reader = db.newObjectReader(); var tree = org.eclipse.jgit.treewalk.TreeWalk.forPath(
+					reader, "two", scenario.target().getTree())) {
+				NativeFsMonitorWorkloadSupport.nativeUntrackedIndexMutation(db, null,
+						"--cacheinfo", "100644," + tree.getObjectId(0).name() + ",two");
+			}
+			try (Git git = Git.wrap(db)) {
+				git.checkout().setStartPoint(scenario.target()).addPath("two").call();
+			}
+			org.eclipse.jgit.junit.NativeUntrackedCheckoutSupport.assertResult(db, scenario, false);
+		}
+	}
+
+	@Test
+	public void nativeRootRemovalPreservesUnchangedCachedDirectories() throws Exception {
+		selectiveFixture(20);
+		NativeFsMonitorWorkloadSupport.nativeUntrackedIndexMutation(db, null,
+				"--force-remove", "two");
+		DirCache index = db.lockDirCache();
+		try {
+			DirCacheEditor editor = index.editor();
+			editor.add(new DirCacheEditor.DeletePath("two"));
+			editor.finish();
+			index.write();
+			assertTrue(index.commit());
+		} finally {
+			index.unlock();
+		}
+		NativeFsMonitorWorkloadSupport.assertNativeUntrackedCachePolicy(db);
+		NativeUntrackedCacheSnapshots.assertNativeDump(db.readDirCache().getUntrackedCache(), 21);
+	}
+
+	@Test
+	public void nativeRootAdditionPreservesUnchangedCachedDirectories() throws Exception {
+		selectiveFixture(23);
+		NativeFsMonitorWorkloadSupport.nativeUntrackedIndexMutation(db, null,
+				"--add", "--cacheinfo", "100644," + Constants.EMPTY_BLOB_ID.name() + ",two");
+		DirCache index = db.lockDirCache();
+		try {
+			var builder = index.builder();
+			builder.keep(0, index.getEntryCount());
+			DirCacheEntry added = new DirCacheEntry("two");
+			added.setFileMode(FileMode.REGULAR_FILE);
+			added.setObjectId(Constants.EMPTY_BLOB_ID);
+			builder.add(added);
+			builder.finish();
+			index.write();
+			assertTrue(index.commit());
+		} finally {
+			index.unlock();
+		}
+		NativeFsMonitorWorkloadSupport.assertNativeUntrackedCachePolicy(db);
+		NativeUntrackedCacheSnapshots.assertNativeDump(db.readDirCache().getUntrackedCache(), 24);
+	}
+
+	@Test
+	public void samePathReplacementRetainsNativeUntrackedPayload() throws Exception {
+		selectiveFixture(20);
+		NativeFsMonitorWorkloadSupport.nativeUntrackedIndexMutation(db, null,
+				"--cacheinfo", "100755," + Constants.EMPTY_BLOB_ID.name() + ",two");
+		DirCache index = db.lockDirCache();
+		try {
+			DirCacheEditor editor = index.editor();
+			editor.add(new DirCacheEditor.PathEdit("two") {
+				@Override
+				public void apply(DirCacheEntry entry) {
+					entry.setFileMode(FileMode.EXECUTABLE_FILE);
+					entry.setObjectId(Constants.EMPTY_BLOB_ID);
+				}
+			});
+			editor.finish();
+			index.write();
+			assertTrue(index.commit());
+		} finally {
+			index.unlock();
+		}
+		NativeFsMonitorWorkloadSupport.assertNativeUntrackedCachePolicy(db);
+		NativeUntrackedCacheSnapshots.assertNativeDump(db.readDirCache().getUntrackedCache(), 20);
+	}
+
+	@Test
+	public void directStageMutationsInvalidateNativeCachedPaths() throws Exception {
+		for (boolean builder : new boolean[] { false, true }) {
+			selectiveFixture(20);
+			String input = "0 " + ObjectId.zeroId().name() + "\ttwo\n100644 "
+					+ Constants.EMPTY_BLOB_ID.name() + " 1\ttwo\n";
+			NativeFsMonitorWorkloadSupport.nativeUntrackedIndexMutation(db,
+					Constants.encode(input), "--index-info");
+			DirCache index = db.lockDirCache();
+			try {
+				index.getEntry("two").setStage(1);
+				index.getEntry("two").setObjectId(Constants.EMPTY_BLOB_ID);
+				if (builder) {
+					var edit = index.builder();
+					edit.keep(0, index.getEntryCount());
+					edit.finish();
+				}
+				index.write();
+				assertTrue(index.commit());
+			} finally {
+				index.unlock();
+			}
+			NativeFsMonitorWorkloadSupport.assertNativeUntrackedCachePolicy(db);
+		}
+	}
+
+	private void selectiveFixture(int checkpoint) throws Exception {
+		db.getConfig().setBoolean("feature", null, "manyFiles", false);
+		db.getConfig().setString("core", null, "untrackedCache", "keep");
+		NativeUntrackedCacheSnapshots.install(db, checkpoint);
+	}
+
+	@Test
+	public void unchangedBuilderRetainsNativeUntrackedPayload() throws Exception {
+		selectiveFixture(20);
+		NativeFsMonitorWorkloadSupport.nativeUntrackedIndexMutation(db, null);
+		DirCache index = db.lockDirCache();
+		try {
+			var builder = index.builder();
+			builder.keep(0, index.getEntryCount());
+			builder.finish();
+			index.write();
+			assertTrue(index.commit());
+		} finally {
+			index.unlock();
+		}
+		NativeFsMonitorWorkloadSupport.assertNativeUntrackedCachePolicy(db);
+		NativeUntrackedCacheSnapshots.assertNativeDump(db.readDirCache().getUntrackedCache(), 20);
+	}
+
+	@Test
+	public void nestedIndexRemovalMatchesNativeNormalAndAllModes() throws Exception {
+		writeTrashFile("tracked", "base");
+		writeTrashFile("sub/tracked", "base");
+		writeTrashFile("sub/loose", "untracked");
+		writeTrashFile("other/loose", "untracked");
+		for (String mode : List.of("normal", "all")) {
+			db.getConfig().setBoolean("feature", null, "manyFiles", false);
+			db.getConfig().setBoolean("core", null, "untrackedCache", true);
+			db.getConfig().setString("status", null, "showUntrackedFiles", mode);
+			db.getConfig().save();
+			try (Git git = Git.wrap(db)) {
+				git.add().addFilepattern("tracked").addFilepattern("sub/tracked").call();
+			}
+			for (String directory : List.of("", "sub", "other")) {
+				Files.setLastModifiedTime(db.getWorkTree().toPath().resolve(directory),
+						java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() - 60000));
+			}
+			nativeGit("status", "--porcelain=v1", "-z", "--untracked-files=" + mode);
+			nativeGit("status", "--porcelain=v1", "-z", "--untracked-files=" + mode);
+			UntrackedCache before = db.readDirCache().getUntrackedCache();
+			assertTrue("Native warm root: " + mode, before.root.valid);
+			assertEquals("Native traversal flags", "all".equals(mode) ? 0 : 6, before.dirFlags);
+			db.getConfig().setString("core", null, "untrackedCache", "keep");
+			NativeFsMonitorWorkloadSupport.nativeUntrackedIndexMutation(db, null,
+					"--force-remove", "sub/tracked");
+			DirCache index = db.lockDirCache();
+			try {
+				var editor = index.editor();
+				editor.add(new DirCacheEditor.DeletePath("sub/tracked"));
+				editor.finish();
+				index.write();
+				assertTrue(index.commit());
+			} finally {
+				index.unlock();
+			}
+			NativeFsMonitorWorkloadSupport.assertNativeUntrackedCachePolicy(db);
+			assertEquals("Normal invalidates ancestors; all retains them",
+					"all".equals(mode), db.readDirCache().getUntrackedCache().root.valid);
+		}
+	}
+
+	@Test
+	public void indexWritesApplyNativeUntrackedCachePolicy() throws Exception {
+		for (boolean manyFiles : new boolean[] { false, true }) {
+			for (boolean existing : new boolean[] { false, true }) {
+				for (String value : NativeFsMonitorWorkloadSupport.UNTRACKED_SETTINGS) {
+					NativeFsMonitorWorkloadSupport
+							.nativeUntrackedCachePolicy(db, manyFiles, value, existing);
+					db.getConfig().setBoolean("feature", null, "manyFiles", manyFiles);
+					if (value == null)
+						db.getConfig().unset("core", null, "untrackedCache");
+					else
+						db.getConfig().setString("core", null, "untrackedCache", value);
+					DirCache index = db.lockDirCache();
+					try {
+						index.write();
+						assertTrue(index.commit());
+					} finally {
+						index.unlock();
+					}
+					NativeFsMonitorWorkloadSupport
+							.assertNativeUntrackedCachePolicy(db);
+				}
+			}
+		}
+	}
+
 	private java.nio.file.Path nativeTrace;
+
+	@Test
+	public void nativeManyFilesBooleanFormsSelectUntrackedAndChecksumDefaults()
+			throws Exception {
+		for (String feature : List.of("true", "false", "YES", "off", "", "2",
+				"-1", "+2", "0x10", "010", "1k", "0g", "-2147483648",
+				"2147483647", " 1", " 0")) {
+			NativeFsMonitorWorkloadSupport.nativeUntrackedCachePolicy(db, false,
+					"false", false);
+			NativeFsMonitorWorkloadSupport.nativeUntrackedCacheRewrite(db, feature,
+					null);
+			db.getConfig().setString("feature", null, "manyFiles", feature);
+			db.getConfig().unset("core", null, "untrackedCache");
+			rewriteAndCompareNativePolicy();
+		}
+	}
+
+	@Test
+	public void explicitExtensionSelectionOverridesConfiguration() throws Exception {
+		// t7063: --[no-]untracked-cache overrides core.untrackedCache.
+		for (boolean enabled : new boolean[] { false, true }) {
+			db.getConfig().setBoolean("core", null, "untrackedCache", enabled);
+			for (boolean present : new boolean[] { true, false }) {
+				DirCache index = db.lockDirCache();
+				try {
+					index.setUntrackedCache(present ? new UntrackedCache() : null);
+					index.write();
+					assertTrue(index.commit());
+				} finally {
+					index.unlock();
+				}
+				assertEquals(present, db.readDirCache().getUntrackedCache() != null);
+			}
+		}
+	}
+
+	@Test
+	public void nativeConfigurationControlsFreshTraversalFlags() throws Exception {
+		for (String mode : List.of("all", "normal", "none", "ALL")) {
+			db.getConfig().setString("status", null, "showUntrackedFiles", mode);
+			db.getConfig().save();
+			NativeFsMonitorWorkloadSupport
+					.nativeUntrackedCachePolicy(db, false, "true", false);
+			db.getConfig().setBoolean("core", null, "untrackedCache", true);
+			rewriteAndCompareNativePolicy();
+		}
+	}
+
+	@Test
+	public void foreignAndLegacyIdentitiesFollowNativePolicy() throws Exception {
+		for (boolean legacy : new boolean[] { false, true }) {
+			for (String setting : List.of("keep", "unexpected", "true", "false")) {
+				NativeFsMonitorWorkloadSupport
+						.nativeUntrackedCachePolicy(db, false, "true", true);
+				DirCache raw = DirCache.lock(db.getIndexFile(), db.getFS());
+				try {
+					byte[] ident = raw.getUntrackedCache().ident;
+					if (legacy) {
+						byte[] extra = Constants.encode("legacy location\0");
+						byte[] extended = Arrays.copyOf(ident, ident.length + extra.length);
+						System.arraycopy(extra, 0, extended, ident.length, extra.length);
+						raw.getUntrackedCache().ident = extended;
+					} else {
+						raw.getUntrackedCache().ident = Constants.encode(
+								"Location /foreign/worktree, system Other\0");
+					}
+					raw.write();
+					assertTrue(raw.commit());
+				} finally {
+					raw.unlock();
+				}
+				NativeFsMonitorWorkloadSupport
+						.nativeUntrackedCacheRewrite(db, false, setting);
+				db.getConfig().setBoolean("feature", null, "manyFiles", false);
+				db.getConfig().setString("core", null, "untrackedCache", setting);
+				rewriteAndCompareNativePolicy();
+			}
+		}
+	}
+
+	private void rewriteAndCompareNativePolicy() throws Exception {
+		DirCache index = db.lockDirCache();
+		try {
+			index.write();
+			assertTrue(index.commit());
+		} finally {
+			index.unlock();
+		}
+		NativeFsMonitorWorkloadSupport
+				.assertNativeUntrackedCachePolicy(db);
+	}
 
 	private static final ObjectId IGNORE = ObjectId
 			.fromString("1234567890123456789012345678901234567890");

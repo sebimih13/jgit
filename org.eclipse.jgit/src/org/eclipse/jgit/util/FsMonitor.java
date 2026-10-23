@@ -27,6 +27,7 @@ import java.util.TreeSet;
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.internal.storage.file.FileSnapshot;
+import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
@@ -84,14 +85,10 @@ public final class FsMonitor {
 	 */
 	public static boolean isUntrackedCacheEnabled(Repository repository,
 			Probe probe) {
-		Config config = repository.getConfig();
-		String value = config.getString("core", null, "untrackedCache"); //$NON-NLS-1$ //$NON-NLS-2$
-		if (value == null && config.getBoolean("feature", null, //$NON-NLS-1$
-				"manyFiles", false)) { //$NON-NLS-1$
-			return true;
-		}
-		if (value != null && !"keep".equalsIgnoreCase(value)) { //$NON-NLS-1$
-			return config.getBoolean("core", null, "untrackedCache", false); //$NON-NLS-1$ //$NON-NLS-2$
+		UntrackedCacheConfig.Mode mode = repository.getConfig()
+				.get(UntrackedCacheConfig.KEY).getMode();
+		if (mode != UntrackedCacheConfig.Mode.KEEP) {
+			return mode == UntrackedCacheConfig.Mode.WRITE;
 		}
 		if (probe != null) {
 			return probe.hasUntrackedCache;
@@ -102,6 +99,7 @@ public final class FsMonitor {
 			return false;
 		}
 	}
+
 
 	/** Query result; valid means its token may seed a successful full scan. */
 	public static final class Probe {
