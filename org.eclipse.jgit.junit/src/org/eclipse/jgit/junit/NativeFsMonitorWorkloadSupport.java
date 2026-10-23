@@ -162,12 +162,34 @@ public final class NativeFsMonitorWorkloadSupport {
 		}
 	}
 
+	/**
+	 * Populate native UNTR for a metadata-notification fixture before Java runs.
+	 *
+	 * @param repository disposable file repository
+	 * @throws Exception on native setup failure
+	 */
+	public static void warmNativeUntrackedCache(Repository repository)
+			throws Exception {
+		nativeGit(repository, null, true, "-c", "core.untrackedCache=true",
+				"update-index", "--untracked-cache");
+		for (int i = 0; i < 2; i++)
+			nativeGit(repository, null, true, "-c", "core.untrackedCache=true",
+					"status", "--porcelain=v1", "-z");
+	}
+
 	private static byte[] nativeGit(Repository repository, Path index,
 			String... arguments) throws Exception {
+		return nativeGit(repository, index, false, arguments);
+	}
+
+	private static byte[] nativeGit(Repository repository, Path index,
+			boolean allowIndexRefresh, String... arguments) throws Exception {
 		List<String> command = new ArrayList<>(List.of(
 				System.getProperty("jgit.test.gitExecutable", "git"),
-				"--no-optional-locks", "-c", "core.fsmonitor=false", "-c",
+				"-c", "core.fsmonitor=false", "-c",
 				"core.untrackedCache=false"));
+		if (!allowIndexRefresh)
+			command.add(1, "--no-optional-locks");
 		command.addAll(List.of(arguments));
 		Path output = repository.getDirectory().toPath().resolve("native-p7519.out");
 		Path errors = repository.getDirectory().toPath().resolve("native-p7519.err");

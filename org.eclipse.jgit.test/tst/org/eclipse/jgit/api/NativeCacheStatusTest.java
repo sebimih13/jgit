@@ -9,6 +9,7 @@
  */
 package org.eclipse.jgit.api;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
@@ -259,6 +260,37 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		equal(before, after);
 		assertEquals(Set.of("loose", "dir1/loose"), after.getUntracked());
 		check();
+	}
+
+	// t7519: the original six untracked files and all four metadata paths.
+	// Native UNTR bytes must survive Java monitoring, including nested paths.
+	@Test
+	public void metadataNotificationsPreserveImportedNativeUntrackedPayload()
+			throws Exception {
+		for (String dir : List.of("", "dir1/", "dir2/")) {
+			put(dir + "tracked", "");
+			put(dir + "modified", "");
+		}
+		var age = java.nio.file.attribute.FileTime.fromMillis(
+				System.currentTimeMillis() - 60000);
+		for (String dir : List.of("dir1/", "dir2/", ""))
+			Files.setLastModifiedTime(db.getWorkTree().toPath().resolve(dir), age);
+		NativeFsMonitorWorkloadSupport.warmNativeUntrackedCache(db);
+		byte[] index = Files.readAllBytes(db.getIndexFile().toPath());
+		var imported = db.readDirCache().getUntrackedCache();
+		assertNotNull(imported);
+		assertNotNull(imported.root);
+		assertTrue(imported.root.valid);
+		byte[] payload = imported.write();
+		var before = git.status().call();
+		assertEquals(Set.of("tracked", "modified", "dir1/tracked",
+				"dir1/modified", "dir2/tracked", "dir2/modified"),
+				before.getUntracked());
+		reply(".git", ".git/index", "dir1/.git", "dir1/.git/index");
+		var after = check();
+		equal(before, after);
+		assertArrayEquals(index, Files.readAllBytes(db.getIndexFile().toPath()));
+		assertArrayEquals(payload, db.readDirCache().getUntrackedCache().write());
 	}
 
 	// The .git/index notification itself can be ignored only if the actual
