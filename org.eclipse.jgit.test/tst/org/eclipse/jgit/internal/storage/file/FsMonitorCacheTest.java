@@ -370,9 +370,12 @@ public class FsMonitorCacheTest extends RepositoryTestCase {
 						"update-index", "--force-write-index");
 				assertNull(expected.payload());
 			}
+			assertNotNull("Raw storage reads do not apply disabled writer policy",
+					db.readDirCache().getFsMonitorCache());
 			DirCache index = db.lockDirCache();
 			try {
-				assertNotNull(index.getFsMonitorCache());
+				assertEquals("Writer policy applies before mutation", enabled,
+						index.getFsMonitorCache() != null);
 				index.write();
 				assertTrue(index.commit());
 			} finally {
@@ -383,9 +386,10 @@ public class FsMonitorCacheTest extends RepositoryTestCase {
 		}
 		NativeFsMonitorIndexSupport.prepare(db);
 		db.getConfig().setBoolean("core", null, "fsmonitor", false);
+		var selected = db.readDirCache().getFsMonitorCache();
 		DirCache index = db.lockDirCache();
 		try {
-			index.setFsMonitorCache(index.getFsMonitorCache());
+			index.setFsMonitorCache(selected);
 			index.write();
 			assertTrue(index.commit());
 		} finally {

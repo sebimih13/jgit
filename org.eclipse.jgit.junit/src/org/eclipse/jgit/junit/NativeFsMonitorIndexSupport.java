@@ -94,7 +94,19 @@ public final class NativeFsMonitorIndexSupport {
 	 */
 	public static void report(Repository repo, String... paths)
 			throws Exception {
-		StringBuilder response = new StringBuilder("native-clock\0");
+		reportToken(repo, "native-clock", paths);
+	}
+
+	/**
+	 * Supply an advancing fixture token and its notifications.
+	 * @param repo fixture repository
+	 * @param token next opaque fixture token
+	 * @param paths notified paths
+	 * @throws Exception on fixture I/O failure
+	 */
+	public static void reportToken(Repository repo, String token, String... paths)
+			throws Exception {
+		StringBuilder response = new StringBuilder(token).append('\0');
 		for (String path : paths)
 			response.append(path).append('\0');
 		Files.write(
@@ -169,6 +181,19 @@ public final class NativeFsMonitorIndexSupport {
 	 * @return raw payload or null
 	 */
 	public static byte[] extension(byte[] index) {
+		return extension(index, 0x46534d4e);
+	}
+
+	/**
+	 * Extract UNTR bytes with the same independent bounded fixture decoder.
+	 * @param index complete fixture index
+	 * @return raw UNTR or null
+	 */
+	public static byte[] untrackedExtension(byte[] index) {
+		return extension(index, 0x554e5452);
+	}
+
+	private static byte[] extension(byte[] index, int requestedSignature) {
 		ByteBuffer data = ByteBuffer.wrap(index);
 		assertEquals(0x44495243, data.getInt(0));
 		int version = data.getInt(4);
@@ -196,7 +221,7 @@ public final class NativeFsMonitorIndexSupport {
 			int length = data.getInt(offset + 4);
 			assertTrue(length >= 0
 					&& (long) offset + 8 + length <= index.length - 20);
-			if (signature == 0x46534d4e) {
+			if (signature == requestedSignature) {
 				return Arrays.copyOfRange(index, offset + 8,
 						offset + 8 + length);
 			}

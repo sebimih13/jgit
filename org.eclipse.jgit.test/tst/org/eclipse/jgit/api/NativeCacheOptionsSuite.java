@@ -17,6 +17,7 @@ import org.eclipse.jgit.treewalk.IndexPreloaderTest;
 import org.eclipse.jgit.treewalk.UntrackedDirectoryListingTest;
 import org.eclipse.jgit.util.FsMonitorIndexQueryTest;
 import org.eclipse.jgit.util.FsMonitorInitializationTest;
+import org.eclipse.jgit.util.FsMonitorWriterRefreshTest;
 import org.eclipse.jgit.util.FsMonitorTest;
 import org.junit.runner.RunWith;
 import org.junit.runners.Suite;
@@ -25,7 +26,7 @@ import org.junit.runners.Suite;
 @RunWith(Suite.class)
 @Suite.SuiteClasses({ NativeCacheStatusTest.class, FsMonitorTest.class,
 		FsMonitorIndexQueryTest.class, FsMonitorInitializationTest.class,
-		FsMonitorCacheTest.class,
+		FsMonitorCacheTest.class, FsMonitorWriterRefreshTest.class,
 		UntrackedCacheTest.class, UntrackedDirectoryListingTest.class,
 		PreloadIndexCommandTest.class, IndexPreloaderTest.class,
 		IndexSkipHashTest.class, NativeIndexVersionTest.class })

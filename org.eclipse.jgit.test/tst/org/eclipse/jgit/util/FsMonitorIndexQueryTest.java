@@ -47,6 +47,7 @@ public class FsMonitorIndexQueryTest extends RepositoryTestCase {
 		var staged = NativeFsMonitorIndexSupport.mutate(db, "add", "sub/leaf");
 		Files.copy(staged.index(), db.getIndexFile().toPath(),
 				StandardCopyOption.REPLACE_EXISTING);
+		NativeFsMonitorIndexSupport.report(db);
 		try (Git git = Git.wrap(db)) {
 			git.commit().setMessage("nested")
 					.setAuthor("Test", "test@example.invalid")
@@ -89,6 +90,7 @@ public class FsMonitorIndexQueryTest extends RepositoryTestCase {
 		var staged = NativeFsMonitorIndexSupport.mutate(db, "add", "sub");
 		Files.copy(staged.index(), db.getIndexFile().toPath(),
 				StandardCopyOption.REPLACE_EXISTING);
+		NativeFsMonitorIndexSupport.report(db);
 		try (Git git = Git.wrap(db)) {
 			git.commit().setMessage("preload threshold")
 					.setAuthor("Test", "test@example.invalid")

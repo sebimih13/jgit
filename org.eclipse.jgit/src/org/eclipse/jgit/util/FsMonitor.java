@@ -159,6 +159,154 @@ public final class FsMonitor {
 	}
 
 	/**
+	 * Whether hook-based monitoring is configured, including an unavailable
+	 * hook that must select conservative fallback. Boolean daemon settings
+	 * are not hook paths.
+	 * @param repository repository to inspect
+	 * @return whether a hook path is configured
+	 * @since 7.8
+	 */
+	public static boolean isHookConfigured(Repository repository) {
+		String hook = configuredHook(repository);
+		return !repository.isBare() && hook != null && !hook.isEmpty()
+				&& !isBooleanSetting(hook);
+	}
+
+	/**
+	 * Refresh persisted monitor state before an index-writing operation.
+	 * Existing dirty entries remain dirty when the provider clock advances.
+	 * This does not write the index; callers must install the returned owner
+	 * context before verifying or changing entries.
+	 * @param repository repository whose index is locked
+	 * @param index freshly read index before mutation
+	 * @return refreshed model, or null when monitoring is disabled
+	 * @throws IOException on invalid untracked-cache mutation
+	 * @since 7.8
+	 */
+	public static FsMonitorCache refreshIndex(Repository repository,
+			DirCache index) throws IOException {
+		FsMonitorCache previous = index.getFsMonitorCache();
+		if (previous == null) {
+			return initializeIndex(repository, index);
+		}
+		String hook = configuredHook(repository);
+		if (hook == null || hook.isEmpty() || Boolean.FALSE.equals(
+				UntrackedCacheConfig.parseBoolean(hook))) {
+			return null;
+		}
+		if (isBooleanSetting(hook)) {
+			return previous; // Daemon IPC is not implemented here.
+		}
+		State state;
+		try {
+			state = storedState(repository, previous);
+		} catch (CharacterCodingException binaryToken) {
+			// Preserve opaque storage that cannot be passed through Java's
+			// String argv API. Direct status queries require a full check.
+			return previous;
+		}
+		Instant now = Instant.now();
+		String boundary = Long.toUnsignedString(now.getEpochSecond()
+				* 1_000_000_000L + now.getNano());
+		Probe probe = state.query(repository, true, index);
+		int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
+				"fsmonitorHookVersion", -1); //$NON-NLS-1$
+		String token = probe != null ? probe.token
+				: requested == 2 ? "" : boundary; //$NON-NLS-1$
+		BitSet dirty = new BitSet();
+		if (probe == null || probe.changedPaths.contains("/")) { //$NON-NLS-1$
+			dirty.set(0, index.getEntryCount());
+		} else {
+			for (int i = 0; i < index.getEntryCount(); i++) {
+				if (!index.isFsMonitorValid(i)) {
+					dirty.set(i);
+				}
+			}
+			for (String path : probe.changedPaths) {
+				String trimmed = path.endsWith("/") //$NON-NLS-1$
+						? path.substring(0, path.length() - 1) : path;
+				try {
+					SystemReader.getInstance().checkPath(trimmed);
+				} catch (org.eclipse.jgit.errors.CorruptObjectException unsafe) {
+					continue;
+				}
+				int matched = invalidateNotification(index, dirty, path);
+				if (matched == 0 && repository.getConfig().getBoolean("core", //$NON-NLS-1$
+						null, "ignoreCase", false)) { //$NON-NLS-1$
+					invalidateCaseNotification(index, dirty, trimmed);
+				}
+			}
+		}
+		return new FsMonitorCache(Constants.encode(token), dirty);
+	}
+
+	private static State storedState(Repository repository, FsMonitorCache stored)
+			throws CharacterCodingException {
+		State state = new State();
+		state.token = StandardCharsets.UTF_8.newDecoder()
+				.onMalformedInput(CodingErrorAction.REPORT)
+				.onUnmappableCharacter(CodingErrorAction.REPORT)
+				.decode(ByteBuffer.wrap(stored.getToken())).toString();
+		int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
+				"fsmonitorHookVersion", -1); //$NON-NLS-1$
+		state.version = requested == 1 || requested != 2
+				&& state.token.matches("[0-9]+") ? 1 : 2; //$NON-NLS-1$
+		return state;
+	}
+
+	private static int invalidateNotification(DirCache index, BitSet dirty,
+			String path) throws IOException {
+		boolean directory = path.endsWith("/"); //$NON-NLS-1$
+		String trimmed = directory ? path.substring(0, path.length() - 1) : path;
+		if (index.getUntrackedCache() != null) {
+			index.getUntrackedCache().invalidatePath(Constants.encode(trimmed));
+		}
+		int pos = directory ? -1 : index.findEntry(path);
+		if (pos >= 0 && index.getEntry(pos).getStage() == 0) {
+			dirty.set(pos);
+			return 1;
+		}
+		if (!directory && index.getUntrackedCache() != null) {
+			index.getUntrackedCache().invalidatePath(Constants.encode(trimmed));
+		}
+		String prefix = trimmed + "/"; //$NON-NLS-1$
+		pos = index.findEntry(prefix);
+		if (pos < 0) {
+			pos = -pos - 1;
+		}
+		int count = 0;
+		for (; pos < index.getEntryCount()
+				&& index.getEntry(pos).getPathString().startsWith(prefix); pos++) {
+			dirty.set(pos);
+			count++;
+		}
+		return count;
+	}
+
+	private static void invalidateCaseNotification(DirCache index, BitSet dirty,
+			String name) throws IOException {
+		for (int i = 0; i < index.getEntryCount(); i++) {
+			DirCacheEntry entry = index.getEntry(i);
+			if (entry.getStage() == 0 && StringUtils.equalsIgnoreCase(name,
+					entry.getPathString())) {
+				invalidateNotification(index, dirty, entry.getPathString());
+				return;
+			}
+		}
+		String prefix = name + "/"; //$NON-NLS-1$
+		for (int i = 0; i < index.getEntryCount(); i++) {
+			String candidate = index.getEntry(i).getPathString();
+			if (candidate.length() >= prefix.length()
+					&& StringUtils.equalsIgnoreCase(prefix,
+							candidate.substring(0, prefix.length()))) {
+				invalidateNotification(index, dirty,
+						candidate.substring(0, prefix.length()));
+				return;
+			}
+		}
+	}
+
+	/**
 	 * Validate persisted FSMN for one scan. The disk token is queried each time
 	 * until a later index publication advances it; notifications are not lost
 	 * between ephemeral scans. The opt-in whole-result cache owns its queries.
@@ -174,16 +322,8 @@ public final class FsMonitor {
 				|| configured.isEmpty() || isBooleanSetting(configured)) {
 			return new IndexQuery(null, false);
 		}
-		State state = new State();
 		try {
-			state.token = StandardCharsets.UTF_8.newDecoder()
-					.onMalformedInput(CodingErrorAction.REPORT)
-					.onUnmappableCharacter(CodingErrorAction.REPORT)
-					.decode(ByteBuffer.wrap(stored.getToken())).toString();
-			int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
-					"fsmonitorHookVersion", -1); //$NON-NLS-1$
-			state.version = requested == 1 || requested != 2 && state.token.matches("[0-9]+") //$NON-NLS-1$
-					? 1 : 2;
+			State state = storedState(repository, stored);
 			Probe probe = state.query(repository, true, index);
 			if (probe != null) {
 				probe.indexChecksum = index.getReadIndexChecksum();

@@ -275,8 +275,15 @@ public class DirCache {
 				indexChangedListener);
 		c.repository = repository;
 		try {
-			c.initializeFsMonitor();
-		} catch (RuntimeException | Error failure) {
+			if (!c.fsMonitorCacheExplicit) {
+				c.fsMonitorCache = FsMonitor.refreshIndex(repository, c);
+				if (c.fsMonitorCache == null) {
+					c.clearFsMonitorBits();
+				} else {
+					c.applyFsMonitorBits();
+				}
+			}
+		} catch (IOException | RuntimeException | Error failure) {
 			c.unlock();
 			throw failure;
 		}
