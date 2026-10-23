@@ -28,6 +28,7 @@ import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
 
@@ -43,6 +44,7 @@ import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.hooks.PostIndexChangeHook;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.storage.file.FileSnapshot;
+import org.eclipse.jgit.internal.storage.file.FsMonitorCache;
 import org.eclipse.jgit.internal.storage.file.LockFile;
 import org.eclipse.jgit.internal.storage.file.UntrackedCache;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
@@ -88,6 +90,8 @@ public class DirCache {
 	private static final int EXT_TREE = 0x54524545 /* 'TREE' */;
 
 	private static final int EXT_UNTR = 0x554e5452 /* 'UNTR' */;
+
+	private static final int EXT_FSMN = 0x46534d4e /* 'FSMN' */;
 
 	private static final DirCacheEntry[] NO_ENTRIES = {};
 
@@ -319,6 +323,10 @@ public class DirCache {
 
 	private UntrackedCache untrackedCache;
 
+	private FsMonitorCache fsMonitorCache;
+
+	private boolean fsMonitorCacheExplicit;
+
 	private boolean untrackedCacheExplicit;
 
 	private UntrackedCacheIndexState untrackedCacheIndexState;
@@ -419,6 +427,97 @@ public class DirCache {
 		rememberUntrackedCacheIndexState();
 	}
 
+	/**
+	 * Digest of the index payload validated during the last read. This is the
+	 * computed SHA-1 even when the stored footer is zero (index.skipHash).
+	 * @return a copy of the read checksum
+	 * @since 7.8
+	 */
+	public byte[] getReadIndexChecksum() {
+		return readIndexChecksum.clone();
+	}
+
+	/**
+	 * Get serialized monitor correlation. This alone does not validate the
+	 * filesystem; a provider query is required before trusting stored bits.
+	 * @return last read/written FSMN data, or null
+	 * @since 7.8
+	 */
+	public FsMonitorCache getFsMonitorCache() {
+		return fsMonitorCache;
+	}
+
+	/**
+	 * Select explicit monitor storage, overriding disabled configuration until
+	 * clear/reload. Dirty positions refer to the current entry ordering.
+	 * @param cache monitor storage, or null to omit it
+	 * @since 7.8
+	 */
+	public void setFsMonitorCache(FsMonitorCache cache) {
+		if (cache != null && cache.getDirtyEntries().length() > entryCnt) {
+			throw new IllegalArgumentException("FSMN bit outside index"); //$NON-NLS-1$
+		}
+		fsMonitorCache = cache;
+		fsMonitorCacheExplicit = true;
+		if (cache == null) clearFsMonitorBits();
+		else applyFsMonitorBits();
+	}
+
+	/**
+	 * Whether an entry retains validity from this index's monitor record.
+	 * This is correlation data, not proof of current filesystem state.
+	 * @param position entry position
+	 * @return stored validity in this provider context, false for gitlinks
+	 * @since 7.8
+	 */
+	public boolean isFsMonitorValid(int position) {
+		DirCacheEntry entry = getEntry(position);
+		return entry.getFileMode() != org.eclipse.jgit.lib.FileMode.GITLINK
+				&& entry.isFsMonitorValid(fsMonitorCache);
+	}
+
+	/**
+	 * Record that an operation verified an entry against the actual working
+	 * filesystem in this index's provider context. This does not query the
+	 * provider or advance its token. Gitlinks always require separate checks.
+	 * @param entry entry just verified by the caller
+	 * @since 7.8
+	 */
+	public void markFsMonitorValid(DirCacheEntry entry) {
+		if (fsMonitorCache != null
+				&& entry.getFileMode() != org.eclipse.jgit.lib.FileMode.GITLINK) {
+			entry.setFsMonitorValid(fsMonitorCache);
+		}
+	}
+
+	private void clearFsMonitorBits() {
+		for (int i = 0; i < entryCnt; i++) {
+			sortedEntries[i].setFsMonitorValid(null);
+		}
+	}
+
+	private void applyFsMonitorBits() {
+		if (fsMonitorCache != null) {
+			for (int i = 0; i < entryCnt; i++) {
+				sortedEntries[i].setFsMonitorValid(fsMonitorCache.isDirty(i)
+						? null : fsMonitorCache);
+			}
+		}
+	}
+
+	private void updateFsMonitorBits() {
+		if (fsMonitorCache != null) {
+			BitSet dirty = new BitSet();
+			for (int i = 0; i < entryCnt; i++) {
+				if (!isFsMonitorValid(i)) {
+					sortedEntries[i].setFsMonitorValid(null);
+					dirty.set(i);
+				}
+			}
+			fsMonitorCache.setDirtyEntries(dirty);
+		}
+	}
+
 	void replace(DirCacheEntry[] e, int cnt) {
 		invalidateUntrackedCache(e, cnt);
 		sortedEntries = e;
@@ -514,6 +613,8 @@ public class DirCache {
 	 */
 	public void clear() {
 		untrackedCache = null;
+		fsMonitorCache = null;
+		fsMonitorCacheExplicit = false;
 		untrackedCacheExplicit = false;
 		untrackedCacheIndexState = null;
 		snapshot = null;
@@ -604,6 +705,22 @@ public class DirCache {
 				tree = new DirCacheTree(raw, new MutableInteger(), null);
 				break;
 			}
+			case EXT_FSMN: {
+				if (sz > FsMonitorCache.MAX_EXTENSION_SIZE) {
+					skipOptionalExtension(in, md, hdr, sz);
+					break;
+				}
+				byte[] raw = new byte[(int) sz];
+				IO.readFully(in, raw, 0, raw.length);
+				md.update(raw);
+				try {
+					fsMonitorCache = FsMonitorCache.read(raw, entryCnt);
+				} catch (IOException malformed) {
+					// Optional cache failure never bypasses index checksums.
+					fsMonitorCache = null;
+				}
+				break;
+			}
 			case EXT_UNTR: {
 				if (sz > UntrackedCache.MAX_EXTENSION_SIZE) {
 					skipOptionalExtension(in, md, hdr, sz);
@@ -647,6 +764,7 @@ public class DirCache {
 			throw new CorruptObjectException(
 					JGitText.get().DIRCChecksumMismatch);
 		}
+		applyFsMonitorBits();
 		rememberUntrackedCacheIndexState();
 	}
 
@@ -806,6 +924,14 @@ public class DirCache {
 			dos.write(tmp, 0, 8);
 			dos.write(raw);
 		}
+		if (fsMonitorCache != null) {
+			updateFsMonitorBits();
+			byte[] raw = fsMonitorCache.write();
+			NB.encodeInt32(tmp, 0, EXT_FSMN);
+			NB.encodeInt32(tmp, 4, raw.length);
+			dos.write(tmp, 0, 8);
+			dos.write(raw);
+		}
 		writeIndexChecksum = foot.digest();
 		os.write(writeIndexChecksum);
 		os.close();
@@ -819,6 +945,19 @@ public class DirCache {
 				version = config.getIndexVersion();
 			}
 			skipHash = config.isSkipHash();
+			if (fsMonitorCache != null && !fsMonitorCacheExplicit) {
+				String monitor = repository.getConfig().getString("core", null, //$NON-NLS-1$
+						"fsmonitor"); //$NON-NLS-1$
+				if (monitor == null) {
+					monitor = SystemReader.getInstance().getenv("GIT_TEST_FSMONITOR"); //$NON-NLS-1$
+				}
+				if (monitor == null || Boolean.FALSE.equals(
+						UntrackedCacheConfig.parseBoolean(monitor))) {
+					clearFsMonitorBits();
+					fsMonitorCache = null;
+				}
+			}
+
 			if (!untrackedCacheExplicit) {
 				untrackedCache = repository.getConfig()
 						.get(UntrackedCacheConfig.KEY)

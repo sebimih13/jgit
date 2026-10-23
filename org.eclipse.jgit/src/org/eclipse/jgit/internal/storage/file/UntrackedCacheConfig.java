@@ -92,6 +92,30 @@ public final class UntrackedCacheConfig {
 		if (mode == Mode.KEEP || repository.isBare()) {
 			return current;
 		}
+		byte[] encoded = identity(repository);
+		if (current != null && matchesIdentity(current.ident, encoded)) {
+			return current;
+		}
+		UntrackedCache created = new UntrackedCache();
+		created.ident = Arrays.copyOf(encoded, encoded.length + 1);
+		created.dirFlags = dirFlags;
+		return created;
+	}
+
+	/**
+	 * Check location/platform identity without changing extension policy.
+	 * @param repository current repository
+	 * @param cache parsed native cache
+	 * @return whether the first native identity matches
+	 * @throws IOException if the location cannot be resolved
+	 */
+	public boolean matchesIdentity(Repository repository, UntrackedCache cache)
+			throws IOException {
+		return !repository.isBare()
+				&& matchesIdentity(cache.ident, identity(repository));
+	}
+
+	private static byte[] identity(Repository repository) throws IOException {
 		SystemReader reader = SystemReader.getInstance();
 		// Native compat/mingw.c:uname uses "Windows", not the OS version.
 		String system = reader.isWindows() ? "Windows" //$NON-NLS-1$
@@ -100,14 +124,7 @@ public final class UntrackedCacheConfig {
 				+ repository.getWorkTree().getCanonicalPath().replace(
 						java.io.File.separatorChar, '/')
 				+ ", system " + system; //$NON-NLS-1$
-		byte[] encoded = Constants.encode(identity);
-		if (current != null && matchesIdentity(current.ident, encoded)) {
-			return current;
-		}
-		UntrackedCache created = new UntrackedCache();
-		created.ident = Arrays.copyOf(encoded, encoded.length + 1);
-		created.dirFlags = dirFlags;
-		return created;
+		return Constants.encode(identity);
 	}
 
 	private static boolean matchesIdentity(byte[] stored, byte[] expected) {
@@ -119,7 +136,12 @@ public final class UntrackedCacheConfig {
 				expected.length);
 	}
 
-	private static Boolean parseBoolean(String value) {
+	/**
+	 * Parse Git's maybe-boolean, including signed base-0 C integers and units.
+	 * @param value raw setting, or null
+	 * @return boolean value, or null for an unset/non-boolean string
+	 */
+	public static Boolean parseBoolean(String value) {
 		if (value == null) {
 			return null;
 		}

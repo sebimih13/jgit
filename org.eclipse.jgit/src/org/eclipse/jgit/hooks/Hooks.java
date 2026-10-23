@@ -55,6 +55,20 @@ public class Hooks {
 	}
 
 	/**
+	 * Create a binary FSMonitor query with an explicit protocol version.
+	 * @param repo repository
+	 * @param executable executable selected by core.fsmonitor
+	 * @param version protocol version, 1 or 2
+	 * @param token previous timestamp (v1) or provider token (v2)
+	 * @return the hook
+	 * @since 7.8
+	 */
+	public static FsMonitorHook fsMonitor(Repository repo, File executable,
+			int version, String token) {
+		return new FsMonitorHook(repo, executable, version, token);
+	}
+
+	/**
 	 * Create a pre-auto-gc verification hook.
 	 * @param repo repository
 	 * @param output hook stdout, or null for System.out

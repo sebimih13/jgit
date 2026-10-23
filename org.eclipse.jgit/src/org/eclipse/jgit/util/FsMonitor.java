@@ -19,14 +19,22 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.TreeSet;
 
 import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheEntry;
+import org.eclipse.jgit.errors.CommandFailedException;
 import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.internal.storage.file.FileSnapshot;
+import org.eclipse.jgit.internal.storage.file.FsMonitorCache;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.lib.Config;
 import org.eclipse.jgit.lib.Constants;
@@ -35,7 +43,7 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 
 /**
- * Opt-in, process-local fsmonitor hook v2 validation for status caches.
+ * Opt-in, process-local fsmonitor hook validation for status caches.
  * <p>
  * No FSMN bits or native UNTR data are used for scan reuse. Changes and
  * untrusted replies always require a full scan. Callers must retain a
@@ -101,25 +109,128 @@ public final class FsMonitor {
 	}
 
 
+	/**
+	 * A direct index query, separate from whole-result cache publication.
+	 * @param probe successful query, or null
+	 * @param forceContentCheck whether failed correlation needs content checks
+	 */
+	public record IndexQuery(Probe probe, boolean forceContentCheck) {
+	}
+
+	/**
+	 * Validate persisted FSMN for one scan. The disk token is queried each time
+	 * until a later index publication advances it; notifications are not lost
+	 * between ephemeral scans. The opt-in whole-result cache owns its queries.
+	 * @param repository repository to scan
+	 * @param index already read index
+	 * @return validation or conservative fallback
+	 * @since 7.8
+	 */
+	public static IndexQuery queryStoredIndex(Repository repository, DirCache index) {
+		FsMonitorCache stored = index.getFsMonitorCache();
+		String configured = repository.getConfig().getString("core", null, "fsmonitor"); //$NON-NLS-1$ //$NON-NLS-2$
+		if (stored == null || isEnabled(repository) || configured == null
+				|| configured.isEmpty() || isBooleanSetting(configured)) {
+			return new IndexQuery(null, false);
+		}
+		State state = new State();
+		try {
+			state.token = StandardCharsets.UTF_8.newDecoder()
+					.onMalformedInput(CodingErrorAction.REPORT)
+					.onUnmappableCharacter(CodingErrorAction.REPORT)
+					.decode(ByteBuffer.wrap(stored.getToken())).toString();
+			int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
+					"fsmonitorHookVersion", -1); //$NON-NLS-1$
+			state.version = requested == 1 ? 1 : 2;
+			Probe probe = state.query(repository, true, index.getReadIndexChecksum());
+			if (probe != null) {
+				probe.indexChecksum = index.getReadIndexChecksum();
+				probe.dirtyEntries = stored.getDirtyEntries();
+				probe.entryCount = index.getEntryCount();
+			}
+			return new IndexQuery(probe, state.requiresFullContentCheck());
+		} catch (Exception invalid) {
+			return new IndexQuery(null, true);
+		}
+	}
+
 	/** Query result; valid means its token may seed a successful full scan. */
 	public static final class Probe {
 		private final String fingerprint;
 
 		private final String token;
 
+		private final int version;
+
 		private final boolean unchanged;
 
 		private final List<String> changedPaths;
 
+		private byte[] indexChecksum;
+
+		private BitSet dirtyEntries;
+
+		private int entryCount;
+
 		private final boolean hasUntrackedCache;
 
 		private Probe(String fingerprint, String token, boolean unchanged,
-				List<String> changedPaths, boolean hasUntrackedCache) {
+				List<String> changedPaths, boolean hasUntrackedCache, int version) {
 			this.fingerprint = fingerprint;
 			this.token = token;
+			this.version = version;
 			this.unchanged = unchanged;
 			this.changedPaths = List.copyOf(changedPaths);
 			this.hasUntrackedCache = hasUntrackedCache;
+		}
+
+		/**
+		 * Whether this provider result belongs to the supplied index payload.
+		 * @param index index to scan
+		 * @return whether native validity may be considered
+		 * @since 7.8
+		 */
+		public boolean validatesIndex(DirCache index) {
+			return indexChecksum != null && entryCount == index.getEntryCount()
+					&& Arrays.equals(indexChecksum, index.getReadIndexChecksum())
+					&& !changedPaths.contains("/"); //$NON-NLS-1$
+		}
+
+		/**
+		 * Native dirty entries must be checked even without a new notification.
+		 * @param index matching index
+		 * @return paths requiring content validation
+		 * @since 7.8
+		 */
+		public List<String> getIndexCheckPaths(DirCache index) {
+			if (!validatesIndex(index)) return List.of("/"); //$NON-NLS-1$
+			List<String> paths = new ArrayList<>(changedPaths);
+			for (int i = dirtyEntries.nextSetBit(0); i >= 0;
+					i = dirtyEntries.nextSetBit(i + 1)) {
+				paths.add(index.getEntry(i).getPathString());
+			}
+			return paths;
+		}
+
+		/**
+		 * Entries eligible for metadata reuse after forced paths are removed.
+		 * @param index matching index
+		 * @return operation-local entry identities, excluding gitlinks and flags
+		 * @since 7.8
+		 */
+		public Set<DirCacheEntry> getIndexValidEntries(DirCache index) {
+			Set<DirCacheEntry> result = new HashSet<>();
+			if (validatesIndex(index)) {
+				for (int i = 0; i < index.getEntryCount(); i++) {
+					DirCacheEntry entry = index.getEntry(i);
+					if (!dirtyEntries.get(i) && entry.getStage() == 0
+							&& !entry.isAssumeValid() && !entry.isSkipWorkTree()
+							&& entry.getFileMode() != FileMode.GITLINK) {
+						result.add(entry);
+					}
+				}
+			}
+			return result;
 		}
 
 		/** @return whether no filesystem/context changes were observed */
@@ -143,7 +254,11 @@ public final class FsMonitor {
 
 		private String token;
 
+		private int version;
+
 		private String checkedIndex;
+
+		private byte[] indexChecksum;
 
 		private boolean supportedIndex;
 
@@ -176,11 +291,16 @@ public final class FsMonitor {
 		 * @return a probe, or null when a full scan cannot seed this cache
 		 */
 		public synchronized Probe query(Repository repository) {
+			return query(repository, false, null);
+		}
+
+		private synchronized Probe query(Repository repository, boolean storedQuery,
+				byte[] expectedChecksum) {
 			// Once correlation is lost, ordinary stat equality is insufficient
 			// until a successful monitored scan establishes a new token.
 			boolean lostCorrelation = token != null || fullContentCheckRequired;
 			fullContentCheckRequired = false;
-			if (!isEnabled(repository)) {
+			if (!storedQuery && !isEnabled(repository)) {
 				fallback(lostCorrelation);
 				return null;
 			}
@@ -189,11 +309,11 @@ public final class FsMonitor {
 				boolean supported = false;
 				try {
 					Config config = repository.getConfig();
-					if (config.getInt("core", null, "fsmonitorHookVersion", //$NON-NLS-1$ //$NON-NLS-2$
-							2) != 2) {
-						fallback(lostCorrelation);
-						return null;
-					}
+					int requestedVersion = config.getInt("core", null, //$NON-NLS-1$
+							"fsmonitorHookVersion", -1); //$NON-NLS-1$
+					boolean auto = requestedVersion != 1
+							&& requestedVersion != 2;
+					int queryVersion = requestedVersion == 1 ? 1 : 2;
 					String hook = config.getString("core", null, "fsmonitor"); //$NON-NLS-1$ //$NON-NLS-2$
 					if (hook == null || hook.isEmpty()
 							|| isBooleanSetting(hook)) {
@@ -222,10 +342,11 @@ public final class FsMonitor {
 					String index = digest(repository.getIndexFile().toPath());
 					if (!index.equals(checkedIndex)) {
 						DirCache cache = repository.readDirCache();
+						indexChecksum = cache.getReadIndexChecksum();
 						hasUntrackedCache = cache.getUntrackedCache() != null;
 						supportedIndex = true;
 						for (int i = 0; i < cache.getEntryCount(); i++) {
-							if (cache.getEntry(i)
+							if (!storedQuery && cache.getEntry(i)
 									.getFileMode() == FileMode.GITLINK) {
 								supportedIndex = false;
 								break;
@@ -243,15 +364,42 @@ public final class FsMonitor {
 					supported = true;
 					String key = fingerprint(repository, index,
 							executable.toPath());
+					if (storedQuery && Arrays.equals(expectedChecksum, indexChecksum)) {
+						// The configured provider validates this persisted token;
+						// no process-local Status result is implied by this anchor.
+						fingerprint = key;
+					}
 					// A stale Watchman clock requests a fresh-instance reply
 					// even
 					// when this JVM starts after another client established the
 					// watch.
 					// Other v2 providers may reject it; rejection requires a
 					// full scan.
-					String since = token == null ? "c:0:0:0:0" : token; //$NON-NLS-1$
-					byte[] response = Hooks.fsMonitor(repository, executable, since).call();
-					String[] records = parse(response);
+					// Capture the v1 boundary before invoking the provider. Its
+					// next query must include changes during this query/scan.
+					Instant now = Instant.now();
+					String timestamp = Long.toUnsignedString(now.getEpochSecond()
+							* 1_000_000_000L + now.getNano());
+					String since = token != null && version == queryVersion ? token
+							: queryVersion == 1 ? timestamp : "c:0:0:0:0"; //$NON-NLS-1$
+					byte[] response;
+					try {
+						response = Hooks.fsMonitor(repository, executable,
+								queryVersion, since).call();
+					} catch (IOException failure) {
+						// Retry only a failed child, never a timeout, interruption,
+						// oversized response or malformed successful v2 reply.
+						if (!auto || !(failure
+								.getCause() instanceof CommandFailedException)) {
+							throw failure;
+						}
+						queryVersion = 1;
+						since = token != null && version == 1 ? token : timestamp;
+						response = Hooks.fsMonitor(repository, executable, 1,
+								since).call();
+					}
+					String[] records = queryVersion == 1
+							? parseVersionOne(response, timestamp) : parse(response);
 					if (records == null) {
 						trace.data("query/failed", "invalid-response"); //$NON-NLS-1$ //$NON-NLS-2$
 						clear();
@@ -281,14 +429,19 @@ public final class FsMonitor {
 						fullContentCheckRequired = true;
 						return null;
 					}
-					boolean sameContext = key.equals(fingerprint);
+					boolean sameContext = key.equals(fingerprint)
+							&& version == queryVersion;
 					// The supplied hook can return an ephemeral zero-epoch
 					// clock
 					// when its daemon is unavailable. Such a reply cannot
 					// validate
 					// cached data, even if it lists only Git metadata.
-					boolean sameInstance = sameMonitorInstance(token,
-							records[0]);
+					boolean sameInstance = queryVersion == 1
+							? token != null && version == 1
+									&& Long.compareUnsigned(
+											Long.parseUnsignedLong(timestamp),
+											Long.parseUnsignedLong(token)) >= 0
+							: sameMonitorInstance(token, records[0]);
 					noChanges &= sameInstance;
 					if (!sameContext || !sameInstance) {
 						changedPaths = List.of("/"); //$NON-NLS-1$
@@ -296,7 +449,7 @@ public final class FsMonitor {
 					trace.data("cache/hit", //$NON-NLS-1$
 							Boolean.toString(noChanges && sameContext));
 					return new Probe(key, records[0], noChanges && sameContext,
-							changedPaths, hasUntrackedCache);
+							changedPaths, hasUntrackedCache, queryVersion);
 				} catch (Exception failure) {
 					if (failure instanceof InterruptedException) {
 						Thread.currentThread().interrupt();
@@ -336,6 +489,7 @@ public final class FsMonitor {
 			}
 			fingerprint = probe.fingerprint;
 			token = probe.token;
+			version = probe.version;
 		}
 	}
 
@@ -482,6 +636,22 @@ public final class FsMonitor {
 	}
 
 
+	static String[] parseVersionOne(byte[] response, String timestamp)
+			throws CharacterCodingException {
+		if (response.length == 0) {
+			return new String[] { timestamp };
+		}
+		// The original fsmonitor-all fixture uses echo "/", including LF.
+		if (response[0] == '/') {
+			return new String[] { timestamp, "/" }; //$NON-NLS-1$
+		}
+		String paths = StandardCharsets.UTF_8.newDecoder()
+				.onMalformedInput(CodingErrorAction.REPORT)
+				.onUnmappableCharacter(CodingErrorAction.REPORT)
+				.decode(ByteBuffer.wrap(response)).toString();
+		return parseRecords((timestamp + '\0' + paths).split("\u0000", -1)); //$NON-NLS-1$
+	}
+
 	static String[] parse(byte[] response) throws CharacterCodingException {
 		if (response.length == 0) {
 			return null;
@@ -490,7 +660,10 @@ public final class FsMonitor {
 				.onMalformedInput(CodingErrorAction.REPORT)
 				.onUnmappableCharacter(CodingErrorAction.REPORT)
 				.decode(ByteBuffer.wrap(response)).toString();
-		String[] fields = text.split("\u0000", -1); //$NON-NLS-1$
+		return parseRecords(text.split("\u0000", -1)); //$NON-NLS-1$
+	}
+
+	private static String[] parseRecords(String[] fields) {
 		if (fields.length < 2 || fields[0].isEmpty()) {
 			return null;
 		}

@@ -74,6 +74,7 @@ import org.eclipse.jgit.lib.HookConfig;
 import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.treewalk.FileTreeIterator.FileEntry;
 import org.eclipse.jgit.treewalk.FileTreeIterator.FileModeStrategy;
@@ -2735,6 +2736,28 @@ public abstract class FS {
 			this.creationTime = creationTime;
 			this.lastModifiedInstant = lastModifiedInstant;
 			this.length = length;
+		}
+
+		/**
+		 * Metadata for a tracked leaf whose index state has been validated by a
+		 * filesystem monitor. No filesystem probe is performed by this factory.
+		 * @param fs filesystem
+		 * @param file tracked file
+		 * @param mode index file mode
+		 * @param modified index modification time
+		 * @param size index length
+		 * @return operation-local trusted metadata
+		 * @since 7.8
+		 */
+		public static Attributes fromIndex(FS fs, File file, FileMode mode,
+				Instant modified, long size) {
+			if (mode != FileMode.REGULAR_FILE && mode != FileMode.EXECUTABLE_FILE
+					&& mode != FileMode.SYMLINK) {
+				throw new IllegalArgumentException("Expected tracked leaf mode"); //$NON-NLS-1$
+			}
+			return new Attributes(fs, file, true, false,
+					mode == FileMode.EXECUTABLE_FILE, mode == FileMode.SYMLINK,
+					mode != FileMode.SYMLINK, 0, modified, size);
 		}
 
 		/**

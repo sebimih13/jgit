@@ -21,9 +21,11 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.Map;
 
 import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.FileMode;
@@ -49,6 +51,10 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	protected final File directory;
 
 	private IndexPreloader preloaded;
+
+	private IndexPreloader monitorMetadata;
+
+	private UntrackedDirectoryListing untrackedListing;
 
 	/**
 	 * the file system abstraction which will be necessary to perform certain
@@ -179,6 +185,7 @@ public class FileTreeIterator extends WorkingTreeIterator {
 		this.fileModeStrategy = fileModeStrategy;
 		if (p instanceof FileTreeIterator) {
 			preloaded = ((FileTreeIterator) p).preloaded;
+			untrackedListing = ((FileTreeIterator) p).untrackedListing;
 		}
 		init(entries());
 	}
@@ -223,13 +230,49 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 * @since 7.8
 	 */
 	public void preloadIndex(DirCache index, ProgressMonitor monitor) {
-		preloaded = null;
+		preloaded = monitorMetadata;
+		if (monitorMetadata != null) return;
 		Repository repo = getRepository();
 		// Preserve custom FS.list implementations and Win32 enumeration,
 		// which already supplies file attributes.
 		if (repo != null && fs.getClass() == FS_POSIX.class && repo.getConfig()
 				.getBoolean("core", null, "preloadIndex", false)) { //$NON-NLS-1$ //$NON-NLS-2$
 			preloaded = IndexPreloader.load(repo, fs, index, monitor);
+		}
+	}
+
+	@Override
+	public void setFsMonitorValidEntries(Collection<DirCacheEntry> entries) {
+		super.setFsMonitorValidEntries(entries);
+		monitorMetadata = !entries.isEmpty() && getClass() == FileTreeIterator.class
+				&& fs.getClass() == FS_POSIX.class && getRepository() != null
+				? IndexPreloader.fromMonitor(getRepository(), fs, entries) : null;
+		preloaded = monitorMetadata;
+	}
+
+	/**
+	 * Reuse complete Java directory listings when native UNTR stat data and a
+	 * prior listing validate them. Entry metadata and ignore rules stay fresh.
+	 * The already constructed root listing is not replaced. No index is written.
+	 *
+	 * @param index validated index for this walk
+	 * @since 7.8
+	 */
+	public void setUntrackedCache(DirCache index) {
+		untrackedListing = getClass() == FileTreeIterator.class
+				? UntrackedDirectoryListing.create(getRepository(), index) : null;
+	}
+
+	/**
+	 * Finish a successful full walk, retaining only a negative optimization
+	 * hint when none of the native directory records could be reused.
+	 * No index or filesystem data is written.
+	 *
+	 * @since 7.8
+	 */
+	public void finishUntrackedCache() {
+		if (untrackedListing != null) {
+			untrackedListing.finish();
 		}
 	}
 
@@ -240,7 +283,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 		if (attributes == null && fs.getClass() != FS_POSIX.class) {
 			return fs.list(directory, fileModeStrategy);
 		}
-		File[] files = directory.listFiles();
+		File[] files = untrackedListing == null ? directory.listFiles()
+				: untrackedListing.list(directory);
 		if (files == null) {
 			return new Entry[0];
 		}

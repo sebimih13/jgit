@@ -25,6 +25,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -48,6 +49,7 @@ import org.eclipse.jgit.treewalk.WorkingTreeIterator;
 import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
 import org.eclipse.jgit.treewalk.filter.IndexDiffFilter;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
+import org.eclipse.jgit.util.FsMonitor;
 import org.eclipse.jgit.util.Trace2;
 
 /**
@@ -490,10 +492,10 @@ public class IndexDiff {
 		forceContentCheckPaths = java.util.List.copyOf(paths);
 	}
 
-	private void configureContentChecks() {
+	private Set<DirCacheEntry> configureContentChecks() {
 		if (forceContentCheckPaths.isEmpty()) {
 			initialWorkingTreeIterator.setForceContentCheckEntries(Collections.emptySet());
-			return;
+			return Collections.emptySet();
 		}
 		Set<DirCacheEntry> entries = new HashSet<>();
 		boolean all = repository.getConfig().getBoolean("core", null, //$NON-NLS-1$
@@ -510,7 +512,7 @@ public class IndexDiff {
 				addContentCheckEntry(entries, dirCache.getEntry(i));
 			}
 			initialWorkingTreeIterator.setForceContentCheckEntries(entries);
-			return;
+			return entries;
 		}
 		for (String path : forceContentCheckPaths) {
 			String directory = path.endsWith("/") ? path : path + "/"; //$NON-NLS-1$ //$NON-NLS-2$
@@ -531,6 +533,7 @@ public class IndexDiff {
 			}
 		}
 		initialWorkingTreeIterator.setForceContentCheckEntries(entries);
+		return entries;
 	}
 
 	private static void addContentCheckEntry(Set<DirCacheEntry> entries,
@@ -548,7 +551,25 @@ public class IndexDiff {
 		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
 				"index", "read")) { //$NON-NLS-1$ //$NON-NLS-2$
 			dirCache = repository.readDirCache();
-			configureContentChecks();
+			FsMonitor.IndexQuery query = initialWorkingTreeIterator.getClass() == FileTreeIterator.class
+					? FsMonitor.queryStoredIndex(repository, dirCache)
+					: new FsMonitor.IndexQuery(null, false);
+			FsMonitor.Probe probe = query.probe();
+			if (query.forceContentCheck()) {
+				forceContentCheckPaths = List.of("/"); //$NON-NLS-1$
+			} else if (probe != null) {
+				List<String> checks = new ArrayList<>(forceContentCheckPaths);
+				checks.addAll(probe.getIndexCheckPaths(dirCache));
+				forceContentCheckPaths = checks;
+			}
+			Set<DirCacheEntry> forced = configureContentChecks();
+			Set<DirCacheEntry> trusted = probe != null
+					? probe.getIndexValidEntries(dirCache) : new HashSet<>();
+			trusted.removeAll(forced);
+			initialWorkingTreeIterator.setFsMonitorValidEntries(trusted);
+		}
+		if (initialWorkingTreeIterator instanceof FileTreeIterator) {
+			((FileTreeIterator) initialWorkingTreeIterator).setUntrackedCache(dirCache);
 		}
 		if (filter == null
 				&& initialWorkingTreeIterator instanceof FileTreeIterator) {
@@ -763,6 +784,9 @@ public class IndexDiff {
 			monitor.endTask();
 		}
 
+		if (filter == null && initialWorkingTreeIterator instanceof FileTreeIterator) {
+			((FileTreeIterator) initialWorkingTreeIterator).finishUntrackedCache();
+		}
 		ignored = indexDiffFilter.getIgnoredPaths();
 		if (added.isEmpty() && changed.isEmpty() && removed.isEmpty()
 				&& missing.isEmpty() && modified.isEmpty()

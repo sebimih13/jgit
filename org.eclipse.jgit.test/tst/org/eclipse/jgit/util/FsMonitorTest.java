@@ -29,6 +29,100 @@ import org.junit.Test;
 
 public class FsMonitorTest extends RepositoryTestCase {
 	@Test
+	public void versionOneAndAutoNegotiationUseTimestampAndPathOnlyReplies()
+			throws Exception {
+		for (String version : new String[] { "1", null, "0", "3", "-1" }) {
+			configure("printf '%s\\n' \"$1\" >> .git/protocol-calls\n"
+					+ "[ \"$1\" = 1 ] || exit 1\n"
+					+ "case \"$2\" in *[!0-9]*|'') exit 2;; esac\n"
+					+ "cat .git/monitor-response\n");
+			if (version == null)
+				db.getConfig().unset("core", null, "fsmonitorHookVersion");
+			else
+				db.getConfig().setString("core", null, "fsmonitorHookVersion", version);
+			Files.deleteIfExists(db.getDirectory().toPath().resolve("protocol-calls"));
+			reply(""); // t7519/fsmonitor-none: empty success is valid v1.
+			FsMonitor.State state = new FsMonitor.State();
+			FsMonitor.Probe first = state.query(db);
+			org.junit.Assert.assertNotNull(version, first);
+			org.junit.Assert.assertFalse(first.isUnchanged());
+			state.remember(first);
+			assertTrue(version, state.query(db).isUnchanged());
+			String calls = Files.readString(db.getDirectory().toPath().resolve("protocol-calls"));
+			assertEquals(version, "1".equals(version) ? "1\n1\n" : "2\n1\n2\n1\n", calls);
+			reply("nested/file\0loose"); // Final NUL is optional in native Git.
+			assertEquals(java.util.List.of("nested/file", "loose"), state.query(db).getChangedPaths());
+			reply("/\n"); // t7519/fsmonitor-all uses echo, including its newline.
+			assertEquals(java.util.List.of("/"), state.query(db).getChangedPaths());
+		}
+	}
+
+	@Test
+	public void versionOneStatusChecksTrackedAndUntrackedChanges() throws Exception {
+		configure("[ \"$1\" = 1 ] || exit 1\ncat .git/monitor-response\n");
+		db.getConfig().setInt("core", null, "fsmonitorHookVersion", 1);
+		try (Git git = Git.wrap(db)) {
+			File tracked = writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			reply("");
+			Status initial = git.status().call();
+			assertSame(initial, git.status().call());
+			java.nio.file.attribute.FileTime time = Files.getLastModifiedTime(tracked.toPath());
+			writeTrashFile("tracked", "next");
+			Files.setLastModifiedTime(tracked.toPath(), time);
+			writeTrashFile("loose", "new");
+			reply("tracked\0loose");
+			Status changed = git.status().call();
+			assertEquals(Set.of("tracked"), changed.getModified());
+			assertEquals(Set.of("loose"), changed.getUntracked());
+			reply("");
+			assertSame(changed, git.status().call());
+			reply("/\n");
+			assertNotSame(changed, git.status().call());
+		}
+	}
+
+	@Test
+	public void versionSwitchesRebuildCorrelation() throws Exception {
+		configure("if [ \"$1\" = 2 ]; then printf 'opaque\\0'; fi\n");
+		FsMonitor.State state = new FsMonitor.State();
+		FsMonitor.Probe initial = state.query(db);
+		org.junit.Assert.assertNotNull(initial);
+		state.remember(initial);
+		assertTrue(state.query(db).isUnchanged());
+		for (int version : new int[] { 1, 2, 1 }) {
+			db.getConfig().setInt("core", null, "fsmonitorHookVersion", version);
+			FsMonitor.Probe changed = state.query(db);
+			org.junit.Assert.assertNotNull(changed);
+			org.junit.Assert.assertFalse(changed.isUnchanged());
+			assertEquals(java.util.List.of("/"), changed.getChangedPaths());
+			state.remember(changed);
+			assertTrue(state.query(db).isUnchanged());
+		}
+	}
+
+	@Test
+	public void versionOneRejectsUnsafeAndMalformedPathReplies() throws Exception {
+		configure("cat .git/monitor-response\n");
+		db.getConfig().setInt("core", null, "fsmonitorHookVersion", 1);
+		for (String invalid : new String[] { "../outside\0", "a/../outside", "a\0\0" }) {
+			reply(invalid);
+			assertNull(invalid, new FsMonitor.State().query(db));
+		}
+		Files.write(response.toPath(), new byte[] { (byte) 0xc3, 0x28 });
+		assertNull(new FsMonitor.State().query(db));
+	}
+
+	@Test
+	public void successfulMalformedVersionTwoDoesNotRetryVersionOne()
+			throws Exception {
+		configure("printf '%s\\n' \"$1\" >> .git/protocol-calls\nexit 0\n");
+		assertNull(new FsMonitor.State().query(db));
+		assertEquals("2\n", Files.readString(db.getDirectory().toPath().resolve("protocol-calls")));
+	}
+
+	@Test
 	public void untrackedCachePolicyMatchesNativeConfigurationAndReuse()
 			throws Exception {
 		configure(null);
@@ -114,7 +208,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 				assertTrue(hook.setExecutable(false, false));
 				break;
 			case "version":
-				db.getConfig().setInt("core", null, "fsmonitorHookVersion", 1);
+				db.getConfig().setString("core", null, "fsmonitorHookVersion", "not-a-number");
 				break;
 			case "boolean":
 				db.getConfig().setBoolean("core", null, "fsmonitor", false);
@@ -573,7 +667,8 @@ public class FsMonitorTest extends RepositoryTestCase {
 	private byte[] nativeGit(File alternateIndex, String... arguments)
 			throws Exception {
 		java.util.List<String> command = new java.util.ArrayList<>(
-				java.util.List.of("git", "--no-optional-locks", "-C",
+				java.util.List.of(System.getProperty("jgit.test.gitExecutable", "git"),
+						"--no-optional-locks", "-C",
 						db.getWorkTree().getAbsolutePath(), "-c",
 						"core.fsmonitor=false"));
 		command.addAll(java.util.List.of(arguments));
@@ -1045,8 +1140,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 		configure("touch '" + called.getPath().replace("'", "'\\''")
 				+ "'\nprintf 'token\\0'\n");
 		String hook = db.getConfig().getString("core", null, "fsmonitor");
-		for (String version : new String[] { "0", "1", "3", "-1",
-				"not-a-number" }) {
+		for (String version : new String[] { "not-a-number" }) {
 			db.getConfig().setString("core", null, "fsmonitorHookVersion",
 					version);
 			assertNull(new FsMonitor.State().query(db));

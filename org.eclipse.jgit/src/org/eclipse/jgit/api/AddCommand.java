@@ -225,6 +225,7 @@ public class AddCommand extends GitCommand<DirCache> {
 
 			DirCacheBuilder builder = dc.builder();
 			tw.addTree(new DirCacheBuildIterator(builder));
+			boolean standardWorkingTree = workingTreeIterator == null;
 			if (workingTreeIterator == null)
 				workingTreeIterator = new FileTreeIterator(repo);
 			workingTreeIterator.setDirCacheIterator(tw, 0);
@@ -303,6 +304,7 @@ public class AddCommand extends GitCommand<DirCache> {
 				}
 
 				byte[] path = tw.getRawPath();
+				boolean replacesEntry = entry != null && entry.getStage() == 0;
 				if (entry == null || entry.getStage() > 0) {
 					entry = new DirCacheEntry(path);
 				}
@@ -326,6 +328,12 @@ public class AddCommand extends GitCommand<DirCache> {
 					entry.setLength(0);
 					entry.setLastModified(Instant.ofEpochSecond(0));
 					entry.setObjectId(f.getEntryObjectId());
+				}
+				// Native fill_stat_cache_info marks new regular files valid;
+				// replace_index_entry invalidates existing replacements again.
+				if (standardWorkingTree && !replacesEntry
+						&& (mode == FileMode.REGULAR_FILE || mode == FileMode.EXECUTABLE_FILE)) {
+					dc.markFsMonitorValid(entry);
 				}
 				builder.add(entry);
 				lastAdded = path;

@@ -16,12 +16,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
+import org.eclipse.jgit.errors.CommandFailedException;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.Trace2;
 
 /**
- * Query a configured FSMonitor executable using the binary hook v2 protocol.
+ * Query a configured FSMonitor executable using the binary hook v1 or v2 protocol.
  * <p>
  * Unlike event hooks, this executable is selected by core.fsmonitor. Its
  * response is limited to 16 MiB and execution to five seconds. The caller
@@ -42,6 +43,8 @@ public class FsMonitorHook extends GitHook<byte[]> {
 
 	private final String token;
 
+	private final int version;
+
 	/**
 	 * Create a binary FSMonitor query.
 	 *
@@ -53,9 +56,26 @@ public class FsMonitorHook extends GitHook<byte[]> {
 	 *            previous provider token
 	 */
 	protected FsMonitorHook(Repository repo, File executable, String token) {
+		this(repo, executable, 2, token);
+	}
+
+	/**
+	 * Create a query with an explicit protocol version.
+	 * @param repo repository
+	 * @param executable configured executable
+	 * @param version protocol version, 1 or 2
+	 * @param token previous timestamp (v1) or provider token (v2)
+	 * @since 7.8
+	 */
+	protected FsMonitorHook(Repository repo, File executable, int version,
+			String token) {
 		super(repo, null, null);
+		if (version != 1 && version != 2) {
+			throw new IllegalArgumentException("fsmonitor protocol must be 1 or 2"); //$NON-NLS-1$
+		}
 		this.hook = executable;
 		this.token = token;
+		this.version = version;
 	}
 
 	@Override
@@ -65,7 +85,7 @@ public class FsMonitorHook extends GitHook<byte[]> {
 
 	@Override
 	protected String[] getParameters() {
-		return new String[] { "2", token }; //$NON-NLS-1$
+		return new String[] { Integer.toString(version), token };
 	}
 
 	@Override
@@ -119,7 +139,9 @@ public class FsMonitorHook extends GitHook<byte[]> {
 				child.exit(process.pid(), process.exitValue());
 			}
 			if (process.exitValue() != 0) {
-				throw new IOException("fsmonitor failed"); //$NON-NLS-1$
+				throw new IOException("fsmonitor failed", //$NON-NLS-1$
+						new CommandFailedException(process.exitValue(),
+								"fsmonitor failed")); //$NON-NLS-1$
 			}
 			try (InputStream in = Files.newInputStream(output)) {
 				byte[] bytes = in.readNBytes(MAX_RESPONSE + 1);

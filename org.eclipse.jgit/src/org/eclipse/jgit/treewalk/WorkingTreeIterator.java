@@ -894,6 +894,10 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 		if (entry.isUpdateNeeded())
 			return MetadataDiff.DIFFER_BY_METADATA;
 
+		if (state.fsMonitorValidEntries.contains(entry)
+				&& !state.forceContentCheckEntries.contains(entry))
+			return MetadataDiff.EQUAL;
+
 		if (isModeDifferent(entry.getRawMode()))
 			return MetadataDiff.DIFFER_BY_METADATA;
 
@@ -948,6 +952,10 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 			ObjectReader reader) throws IOException {
 		if (entry == null)
 			return !FileMode.MISSING.equals(getEntryFileMode());
+		if (state.fsMonitorValidEntries.contains(entry)
+				&& !state.forceContentCheckEntries.contains(entry)) {
+			return forceContentCheck ? contentCheck(entry, reader) : false;
+		}
 		MetadataDiff diff = compareMetadata(entry);
 		switch (diff) {
 		case DIFFER_BY_TIMESTAMP:
@@ -1007,6 +1015,17 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 	public void setForceContentCheckEntries(Collection<DirCacheEntry> entries) {
 		state.forceContentCheckEntries = Set.copyOf(entries);
 	}
+
+	/**
+	 * Set entries validated against a current provider query for this walk.
+	 * Raw FSMN bits alone must never be passed as proof of validity.
+	 * @param entries operation-local trusted index entries
+	 * @since 7.8
+	 */
+	public void setFsMonitorValidEntries(Collection<DirCacheEntry> entries) {
+		state.fsMonitorValidEntries = Set.copyOf(entries);
+	}
+
 
 	/**
 	 * Get the file mode to use for the current entry when it is to be updated
@@ -1411,6 +1430,8 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 
 	private static final class IteratorState {
 		Set<DirCacheEntry> forceContentCheckEntries = Collections.emptySet();
+
+		Set<DirCacheEntry> fsMonitorValidEntries = Collections.emptySet();
 		/** Options used to process the working tree. */
 		final WorkingTreeOptions options;
 

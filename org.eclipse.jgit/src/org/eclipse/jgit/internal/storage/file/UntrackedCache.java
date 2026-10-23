@@ -611,61 +611,11 @@ public final class UntrackedCache {
 	}
 
 	private static BitSet bitmap(ByteBuffer in, int count) throws IOException {
-		int bits = in.getInt();
-		int words = in.getInt();
-		if (bits < 0 || bits > count || words <= 0
-				|| words > (in.remaining() - 4) / Long.BYTES) {
+		try {
+			return IndexBitmap.read(in, count);
+		} catch (IOException invalid) {
 			throw malformed();
 		}
-		int start = in.position();
-		int end = start + words * Long.BYTES;
-		int rlw = in.getInt(end);
-		if (rlw < 0 || rlw >= words) {
-			throw malformed();
-		}
-		boolean rlwFound = false;
-		long position = 0;
-		long expandedWords = (bits + 63L) / 64;
-		BitSet result = new BitSet(bits);
-		int i = 0;
-		while (i < words) {
-			int controlIndex = i;
-			long control = in.getLong();
-			i++;
-			rlwFound |= rlw == controlIndex;
-			long runs = (control >>> 1) & 0xffffffffL;
-			long literals = control >>> 33;
-			if (runs + literals > expandedWords - position
-					|| literals > words - i) {
-				throw malformed();
-			}
-			if ((control & 1) != 0) {
-				if ((position + runs) * 64 > bits) {
-					throw malformed();
-				}
-				result.set((int) (position * 64),
-						(int) ((position + runs) * 64));
-			}
-			position += runs;
-			for (long j = 0; j < literals; j++) {
-				long literal = in.getLong();
-				int base = (int) (position++ * 64);
-				while (literal != 0) {
-					int bit = base + Long.numberOfTrailingZeros(literal);
-					if (bit >= bits) {
-						throw malformed();
-					}
-					result.set(bit);
-					literal &= literal - 1;
-				}
-				i++;
-			}
-		}
-		if (!rlwFound || position != expandedWords) {
-			throw malformed();
-		}
-		in.position(end + Integer.BYTES);
-		return result;
 	}
 
 	private static IOException malformed() {

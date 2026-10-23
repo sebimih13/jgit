@@ -216,10 +216,11 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		int initialCalls = monitorCalls();
 		assertTrue("Initial status must invoke the monitor", initialCalls > 0);
 		reply();
+		Status repeated = git.status().call();
 		if (untrackedCache) {
-			assertSame(clean, git.status().call());
+			assertSame(clean, repeated);
 		} else {
-			assertTrue(git.status().call().getUntracked().isEmpty());
+			assertTrue(repeated.getUntracked().isEmpty());
 		}
 		int repeatedCalls = monitorCalls();
 		assertTrue("Cached status must query the hook again",
@@ -235,6 +236,10 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 			assertNotSame(clean, hidden);
 		}
 		assertTrue(hidden.getModified().isEmpty());
+		// Disabled UNTR replaces the weak cached result after each scan.
+		// This omitted-notification test needs that result alive; collection
+		// deliberately permits the production fallback to find all edits.
+		java.lang.ref.Reference.reachabilityFence(repeated);
 		Status full = fresh();
 		assertEquals(untrackedCache ? Set.of() : full.getUntracked(),
 				hidden.getUntracked());

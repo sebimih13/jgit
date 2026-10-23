@@ -113,6 +113,9 @@ public class DirCacheEntry {
 	/** Flags which are never stored to disk. */
 	private byte inCoreFlags;
 
+	/** Identity of the FSMN record that last validated this entry. */
+	private Object fsMonitorOwner;
+
 	DirCacheEntry(byte[] sharedInfo, MutableInteger infoAt, InputStream in,
 			MessageDigest md, Instant smudge, DirCacheVersion version,
 			DirCacheEntry previous)
@@ -327,6 +330,15 @@ public class DirCacheEntry {
 		info = new byte[INFO_LEN];
 		infoOffset = 0;
 		System.arraycopy(src.info, src.infoOffset, info, 0, INFO_LEN);
+		fsMonitorOwner = src.fsMonitorOwner;
+	}
+
+	boolean isFsMonitorValid(Object owner) {
+		return owner != null && fsMonitorOwner == owner;
+	}
+
+	void setFsMonitorValid(Object owner) {
+		fsMonitorOwner = owner;
 	}
 
 	private int readNulTerminatedString(InputStream in, OutputStream out)
@@ -486,6 +498,7 @@ public class DirCacheEntry {
 	 *            modified to detect file modifications.
 	 */
 	public void setAssumeValid(boolean assume) {
+		fsMonitorOwner = null;
 		if (assume)
 			info[infoOffset + P_FLAGS] |= (byte) ASSUME_VALID;
 		else
@@ -508,6 +521,7 @@ public class DirCacheEntry {
 	 *            whether this entry must be checked for changes
 	 */
 	public void setUpdateNeeded(boolean updateNeeded) {
+		if (updateNeeded) fsMonitorOwner = null;
 		if (updateNeeded)
 			inCoreFlags |= (byte) UPDATE_NEEDED;
 		else
@@ -535,6 +549,7 @@ public class DirCacheEntry {
 	 * @since 5.10
 	 */
 	public void setStage(int stage) {
+		fsMonitorOwner = null;
 		if ((stage & ~0x3) != 0) {
 			throw new IllegalArgumentException(
 					"Invalid stage, must be in range [0..3]"); //$NON-NLS-1$
@@ -602,6 +617,7 @@ public class DirCacheEntry {
 	 *             code not permitted in a tree object.
 	 */
 	public void setFileMode(FileMode mode) {
+		fsMonitorOwner = null;
 		switch (mode.getBits() & FileMode.TYPE_MASK) {
 		case FileMode.TYPE_MISSING:
 		case FileMode.TYPE_TREE:
@@ -612,6 +628,7 @@ public class DirCacheEntry {
 	}
 
 	void setFileMode(int mode) {
+		fsMonitorOwner = null;
 		NB.encodeInt32(info, infoOffset + P_MODE, mode);
 	}
 
@@ -689,6 +706,7 @@ public class DirCacheEntry {
 	 *            than 2G, cast it to (int) before calling this method.
 	 */
 	public void setLength(int sz) {
+		fsMonitorOwner = null;
 		NB.encodeInt32(info, infoOffset + P_SIZE, sz);
 	}
 
@@ -723,6 +741,7 @@ public class DirCacheEntry {
 	 *            current identifier.
 	 */
 	public void setObjectId(AnyObjectId id) {
+		fsMonitorOwner = null;
 		id.copyRawTo(idBuffer(), idOffset());
 	}
 
@@ -736,6 +755,7 @@ public class DirCacheEntry {
 	 *            position to read the first byte of data from.
 	 */
 	public void setObjectIdFromRaw(byte[] bs, int p) {
+		fsMonitorOwner = null;
 		final int n = Constants.OBJECT_ID_LENGTH;
 		System.arraycopy(bs, p, idBuffer(), idOffset(), n);
 	}
@@ -805,6 +825,7 @@ public class DirCacheEntry {
 	 *            if true, the stage attribute will not be copied
 	 */
 	void copyMetaData(DirCacheEntry src, boolean keepStage) {
+		fsMonitorOwner = null;
 		int origflags = NB.decodeUInt16(info, infoOffset + P_FLAGS);
 		int newflags = NB.decodeUInt16(src.info, src.infoOffset + P_FLAGS);
 		System.arraycopy(src.info, src.infoOffset, info, infoOffset, INFO_LEN);
@@ -843,12 +864,14 @@ public class DirCacheEntry {
 	}
 
 	private void encodeTS(int pIdx, long when) {
+		fsMonitorOwner = null;
 		final int base = infoOffset + pIdx;
 		NB.encodeInt32(info, base, (int) (when / 1000));
 		NB.encodeInt32(info, base + 4, ((int) (when % 1000)) * 1000000);
 	}
 
 	private void encodeTS(int pIdx, Instant when) {
+		fsMonitorOwner = null;
 		final int base = infoOffset + pIdx;
 		NB.encodeInt32(info, base, (int) when.getEpochSecond());
 		NB.encodeInt32(info, base + 4, when.getNano());

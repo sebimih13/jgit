@@ -11,6 +11,7 @@ package org.eclipse.jgit.treewalk;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +40,19 @@ final class IndexPreloader {
 	private final Map<File, Map<String, FS.Attributes>> directories = new HashMap<>();
 
 	private long statCalls;
+
+	static IndexPreloader fromMonitor(Repository repository, FS fs,
+			Collection<DirCacheEntry> entries) {
+		IndexPreloader result = new IndexPreloader();
+		for (DirCacheEntry entry : entries) {
+			File file = fs.normalize(new File(repository.getWorkTree(), entry.getPathString()));
+			result.directories.computeIfAbsent(file.getParentFile(), unused -> new HashMap<>())
+					.put(file.getName(), FS.Attributes.fromIndex(fs, file,
+							entry.getFileMode(), entry.getLastModifiedInstant(),
+							Integer.toUnsignedLong(entry.getLength())));
+		}
+		return result;
+	}
 
 	static IndexPreloader load(Repository repository, FS fs, DirCache index,
 			ProgressMonitor monitor) {
