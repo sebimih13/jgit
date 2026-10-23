@@ -15,6 +15,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -56,10 +57,16 @@ final class IndexPreloader {
 
 	static IndexPreloader load(Repository repository, FS fs, DirCache index,
 			ProgressMonitor monitor) {
+		return load(repository, fs, index, monitor, null, Set.of());
+	}
+
+	static IndexPreloader load(Repository repository, FS fs, DirCache index,
+			ProgressMonitor monitor, IndexPreloader monitored,
+			Set<DirCacheEntry> trusted) {
 		int threads = Math.min(MAX_PARALLEL,
 				index.getEntryCount() / THREAD_COST);
 		if (threads < 2 || cancelled(monitor)) {
-			return null;
+			return monitored;
 		}
 		ExecutorService executor = null;
 		List<Future<IndexPreloader>> tasks = new ArrayList<>(threads);
@@ -78,9 +85,9 @@ final class IndexPreloader {
 					int end = Math.min(index.getEntryCount(), offset + work);
 					tasks.add(
 							executor.submit(() -> read(repository.getWorkTree(),
-									fs, index, start, end)));
+									fs, index, start, end, trusted)));
 				}
-				IndexPreloader result = new IndexPreloader();
+				IndexPreloader result = monitored == null ? new IndexPreloader() : monitored;
 				for (Future<IndexPreloader> task : tasks) {
 					IndexPreloader part;
 					while (true) {
@@ -130,13 +137,13 @@ final class IndexPreloader {
 	}
 
 	private static IndexPreloader read(File root, FS fs, DirCache index,
-			int start, int end) {
+			int start, int end, Set<DirCacheEntry> trusted) {
 		IndexPreloader result = new IndexPreloader();
 		Map<File, Boolean> safeDirectories = new HashMap<>();
 		for (int i = start; i < end
 				&& !Thread.currentThread().isInterrupted(); i++) {
 			DirCacheEntry entry = index.getEntry(i);
-			if (entry.getStage() != 0 || entry.isAssumeValid()
+			if (trusted.contains(entry) || entry.getStage() != 0 || entry.isAssumeValid()
 					|| entry.isSkipWorkTree()
 					|| entry.getFileMode() == FileMode.GITLINK) {
 				continue;

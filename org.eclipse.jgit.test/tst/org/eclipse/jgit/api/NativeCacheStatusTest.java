@@ -152,10 +152,17 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 	}
 
 	private Status fresh() throws Exception {
+		String hook = db.getConfig().getString("core", null, "fsmonitor");
 		db.getConfig().setBoolean("jgit", null, "fsmonitorCache", false);
+		db.getConfig().setBoolean("core", null, "fsmonitor", false);
 		try {
 			return git.status().call();
 		} finally {
+			if (hook == null) {
+				db.getConfig().unset("core", null, "fsmonitor");
+			} else {
+				db.getConfig().setString("core", null, "fsmonitor", hook);
+			}
 			db.getConfig().setBoolean("jgit", null, "fsmonitorCache", true);
 		}
 	}

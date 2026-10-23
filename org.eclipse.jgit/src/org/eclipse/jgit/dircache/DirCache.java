@@ -63,6 +63,7 @@ import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.TreeWalk.OperationType;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
 import org.eclipse.jgit.util.FS;
+import org.eclipse.jgit.util.FsMonitor;
 import org.eclipse.jgit.util.IO;
 import org.eclipse.jgit.util.MutableInteger;
 import org.eclipse.jgit.util.NB;
@@ -273,6 +274,12 @@ public class DirCache {
 		DirCache c = lock(repository.getIndexFile(), repository.getFS(),
 				indexChangedListener);
 		c.repository = repository;
+		try {
+			c.initializeFsMonitor();
+		} catch (RuntimeException | Error failure) {
+			c.unlock();
+			throw failure;
+		}
 		return c;
 	}
 
@@ -937,6 +944,13 @@ public class DirCache {
 		os.close();
 	}
 
+	private void initializeFsMonitor() {
+		if (repository != null && fsMonitorCache == null
+				&& !fsMonitorCacheExplicit) {
+			fsMonitorCache = FsMonitor.initializeIndex(repository, this);
+		}
+	}
+
 	private void readConfig() throws IOException {
 		if (repository != null) {
 			DirCacheConfig config = repository.getConfig()
@@ -963,6 +977,7 @@ public class DirCache {
 						.get(UntrackedCacheConfig.KEY)
 						.applyTo(repository, untrackedCache);
 			}
+			initializeFsMonitor();
 		}
 		// DirCacheEntry is mutable. Also cover direct stage changes followed
 		// by write(), including edits that did not use a builder or editor.

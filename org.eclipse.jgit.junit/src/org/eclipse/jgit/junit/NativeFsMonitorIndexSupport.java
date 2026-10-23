@@ -116,6 +116,23 @@ public final class NativeFsMonitorIndexSupport {
 	}
 
 	/**
+	 * Configure the native hook, leaving the Java index without FSMN so that
+	 * the next Java operation must initialize it itself.
+	 * @param repo disposable fixture repository
+	 * @throws Exception on fixture setup failure
+	 */
+	public static void prepareWithoutExtension(Repository repo) throws Exception {
+		prepare(repo);
+		Expected disabled = mutate(repo, "-c", "core.fsmonitor=false",
+				"update-index", "--no-fsmonitor", "--force-write-index");
+		assertTrue(disabled.payload() == null);
+		Files.copy(disabled.index(), repo.getIndexFile().toPath(),
+				StandardCopyOption.REPLACE_EXISTING,
+				StandardCopyOption.COPY_ATTRIBUTES);
+		assertTrue(repo.readDirCache().getFsMonitorCache() == null);
+	}
+
+	/**
 	 * Run a native mutation against a separate index; source index is
 	 * read-only.
 	 * 
@@ -131,8 +148,15 @@ public final class NativeFsMonitorIndexSupport {
 			throws Exception {
 		Path index = repo.getDirectory().toPath()
 				.resolve("native-fsmn-oracle.index");
-		Files.copy(repo.getIndexFile().toPath(), index,
-				StandardCopyOption.REPLACE_EXISTING);
+		if (repo.getIndexFile().isFile()) {
+			Files.copy(repo.getIndexFile().toPath(), index,
+					StandardCopyOption.REPLACE_EXISTING,
+					StandardCopyOption.COPY_ATTRIBUTES);
+			Files.setLastModifiedTime(index,
+					Files.getLastModifiedTime(repo.getIndexFile().toPath()));
+		} else {
+			Files.deleteIfExists(index);
+		}
 		run(repo, index, args);
 		return new Expected(index, extension(Files.readAllBytes(index)));
 	}
@@ -179,6 +203,35 @@ public final class NativeFsMonitorIndexSupport {
 			offset += 8 + length;
 		}
 		return null;
+	}
+
+	/**
+	 * Capture complete native NUL status without changing the Java index.
+	 * @param repo disposable fixture
+	 * @param monitored whether to use its configured monitor
+	 * @return native porcelain including ignored paths
+	 * @throws Exception on command failure
+	 */
+	public static byte[] status(Repository repo, boolean monitored) throws Exception {
+		Path index = repo.getDirectory().toPath().resolve("native-fsmn-status.index");
+		// Git's racy-stat check uses the index file timestamp, not only its
+		// payload. A fresh timestamp can hide a same-size restored-mtime edit.
+		Files.copy(repo.getIndexFile().toPath(), index,
+				StandardCopyOption.REPLACE_EXISTING,
+				StandardCopyOption.COPY_ATTRIBUTES);
+		// Some JDK copy implementations round copied times to microseconds.
+		Files.setLastModifiedTime(index,
+				Files.getLastModifiedTime(repo.getIndexFile().toPath()));
+		assertEquals("Native oracle must preserve the racy-stat boundary",
+				Files.getLastModifiedTime(repo.getIndexFile().toPath()),
+				Files.getLastModifiedTime(index));
+		List<String> args = new ArrayList<>();
+		args.add("--no-optional-locks");
+		if (!monitored) args.addAll(List.of("-c", "core.fsmonitor=false"));
+		args.addAll(List.of("status", "--porcelain=v1", "-z", "--untracked-files=all",
+				"--ignored=matching", "--no-renames"));
+		run(repo, index, args.toArray(String[]::new));
+		return Files.readAllBytes(repo.getDirectory().toPath().resolve("native-fsmn.out"));
 	}
 
 	private static void run(Repository repo, Path index, String... args)

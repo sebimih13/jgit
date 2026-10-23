@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Set;
 import java.util.Map;
 
 import org.eclipse.jgit.dircache.DirCache;
@@ -53,6 +54,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	private IndexPreloader preloaded;
 
 	private IndexPreloader monitorMetadata;
+
+	private Set<DirCacheEntry> monitorEntries = Set.of();
 
 	private UntrackedDirectoryListing untrackedListing;
 
@@ -231,19 +234,19 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 */
 	public void preloadIndex(DirCache index, ProgressMonitor monitor) {
 		preloaded = monitorMetadata;
-		if (monitorMetadata != null) return;
 		Repository repo = getRepository();
 		// Preserve custom FS.list implementations and Win32 enumeration,
 		// which already supplies file attributes.
 		if (repo != null && fs.getClass() == FS_POSIX.class && repo.getConfig()
 				.getBoolean("core", null, "preloadIndex", false)) { //$NON-NLS-1$ //$NON-NLS-2$
-			preloaded = IndexPreloader.load(repo, fs, index, monitor);
+			preloaded = IndexPreloader.load(repo, fs, index, monitor, monitorMetadata, monitorEntries);
 		}
 	}
 
 	@Override
 	public void setFsMonitorValidEntries(Collection<DirCacheEntry> entries) {
 		super.setFsMonitorValidEntries(entries);
+		monitorEntries = Set.copyOf(entries);
 		monitorMetadata = !entries.isEmpty() && getClass() == FileTreeIterator.class
 				&& fs.getClass() == FS_POSIX.class && getRepository() != null
 				? IndexPreloader.fromMonitor(getRepository(), fs, entries) : null;

@@ -43,12 +43,12 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 
 /**
- * Opt-in, process-local fsmonitor hook validation for status caches.
+ * Fsmonitor hook validation for status caches and native index correlation.
  * <p>
- * No FSMN bits or native UNTR data are used for scan reuse. Changes and
- * untrusted replies always require a full scan. Callers must retain a
- * successful scan result separately and serialize query/scan/remember on their
- * cache lock.
+ * Stored FSMN validity requires a correlated provider query before reuse.
+ * Whole-result caches separately retain a successful scan and serialize
+ * query/scan/remember on their cache lock. Untrusted replies require checking
+ * rather than trusting serialized validity alone.
  * </p>
  *
  * @since 7.8
@@ -118,6 +118,47 @@ public final class FsMonitor {
 	}
 
 	/**
+	 * Establish monitor storage before a repository-aware index mutation.
+	 * Existing entries start dirty even if the initial hook reports no paths.
+	 * Newly verified entries may subsequently be marked valid by the writer.
+	 * This method does not write the index or enable daemon IPC.
+	 *
+	 * @param repository repository whose hook is configured
+	 * @param index index about to be mutated
+	 * @return initial hook state, or null when no hook path is configured
+	 * @since 7.8
+	 */
+	public static FsMonitorCache initializeIndex(Repository repository,
+			DirCache index) {
+		String hook = configuredHook(repository);
+		if (repository.isBare() || hook == null || hook.isEmpty()
+				|| isBooleanSetting(hook)) {
+			return null;
+		}
+		Instant now = Instant.now();
+		String boundary = Long.toUnsignedString(now.getEpochSecond()
+				* 1_000_000_000L + now.getNano());
+		State state = new State();
+		state.token = boundary;
+		state.version = 1;
+		Probe probe = state.query(repository, true, index);
+		int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
+				"fsmonitorHookVersion", -1); //$NON-NLS-1$
+		String token = probe != null ? probe.token
+				: requested == 2 ? "" : boundary; //$NON-NLS-1$
+		BitSet dirty = new BitSet();
+		dirty.set(0, index.getEntryCount());
+		return new FsMonitorCache(Constants.encode(token), dirty);
+	}
+
+	private static String configuredHook(Repository repository) {
+		String hook = repository.getConfig().getString("core", null, //$NON-NLS-1$
+				"fsmonitor"); //$NON-NLS-1$
+		return hook != null ? hook
+				: SystemReader.getInstance().getenv("GIT_TEST_FSMONITOR"); //$NON-NLS-1$
+	}
+
+	/**
 	 * Validate persisted FSMN for one scan. The disk token is queried each time
 	 * until a later index publication advances it; notifications are not lost
 	 * between ephemeral scans. The opt-in whole-result cache owns its queries.
@@ -128,7 +169,7 @@ public final class FsMonitor {
 	 */
 	public static IndexQuery queryStoredIndex(Repository repository, DirCache index) {
 		FsMonitorCache stored = index.getFsMonitorCache();
-		String configured = repository.getConfig().getString("core", null, "fsmonitor"); //$NON-NLS-1$ //$NON-NLS-2$
+		String configured = configuredHook(repository);
 		if (stored == null || isEnabled(repository) || configured == null
 				|| configured.isEmpty() || isBooleanSetting(configured)) {
 			return new IndexQuery(null, false);
@@ -141,8 +182,9 @@ public final class FsMonitor {
 					.decode(ByteBuffer.wrap(stored.getToken())).toString();
 			int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
 					"fsmonitorHookVersion", -1); //$NON-NLS-1$
-			state.version = requested == 1 ? 1 : 2;
-			Probe probe = state.query(repository, true, index.getReadIndexChecksum());
+			state.version = requested == 1 || requested != 2 && state.token.matches("[0-9]+") //$NON-NLS-1$
+					? 1 : 2;
+			Probe probe = state.query(repository, true, index);
 			if (probe != null) {
 				probe.indexChecksum = index.getReadIndexChecksum();
 				probe.dirtyEntries = stored.getDirtyEntries();
@@ -276,6 +318,7 @@ public final class FsMonitor {
 		public synchronized void clear() {
 			boolean checkContents = token != null || fullContentCheckRequired;
 			fingerprint = token = checkedIndex = null;
+			indexChecksum = null;
 			supportedIndex = false;
 			hasUntrackedCache = false;
 			unsupportedIndex = null;
@@ -295,7 +338,7 @@ public final class FsMonitor {
 		}
 
 		private synchronized Probe query(Repository repository, boolean storedQuery,
-				byte[] expectedChecksum) {
+				DirCache suppliedIndex) {
 			// Once correlation is lost, ordinary stat equality is insufficient
 			// until a successful monitored scan establishes a new token.
 			boolean lostCorrelation = token != null || fullContentCheckRequired;
@@ -314,7 +357,7 @@ public final class FsMonitor {
 					boolean auto = requestedVersion != 1
 							&& requestedVersion != 2;
 					int queryVersion = requestedVersion == 1 ? 1 : 2;
-					String hook = config.getString("core", null, "fsmonitor"); //$NON-NLS-1$ //$NON-NLS-2$
+					String hook = configuredHook(repository);
 					if (hook == null || hook.isEmpty()
 							|| isBooleanSetting(hook)) {
 						fallback(lostCorrelation);
@@ -339,8 +382,25 @@ public final class FsMonitor {
 					}
 					FileSnapshot indexSnapshot = FileSnapshot
 							.save(repository.getIndexFile());
-					String index = digest(repository.getIndexFile().toPath());
-					if (!index.equals(checkedIndex)) {
+					String index;
+					byte[] expectedChecksum = storedQuery
+							? suppliedIndex.getReadIndexChecksum() : null;
+					if (storedQuery) {
+						IndexDigest current = digestIndex(
+								repository.getIndexFile().toPath());
+						if (!Arrays.equals(expectedChecksum, current.checksum)) {
+							fallback(true);
+							return null;
+						}
+						index = current.fingerprint;
+						indexChecksum = current.checksum;
+						hasUntrackedCache = suppliedIndex.getUntrackedCache() != null;
+						supportedIndex = true;
+						checkedIndex = index;
+					} else {
+						index = digest(repository.getIndexFile().toPath());
+					}
+					if (!storedQuery && !index.equals(checkedIndex)) {
 						DirCache cache = repository.readDirCache();
 						indexChecksum = cache.getReadIndexChecksum();
 						hasUntrackedCache = cache.getUntrackedCache() != null;
@@ -380,8 +440,9 @@ public final class FsMonitor {
 					Instant now = Instant.now();
 					String timestamp = Long.toUnsignedString(now.getEpochSecond()
 							* 1_000_000_000L + now.getNano());
-					String since = token != null && version == queryVersion ? token
-							: queryVersion == 1 ? timestamp : "c:0:0:0:0"; //$NON-NLS-1$
+					String since = storedQuery && token != null ? token
+							: token != null && version == queryVersion ? token
+									: queryVersion == 1 ? timestamp : "c:0:0:0:0"; //$NON-NLS-1$
 					byte[] response;
 					try {
 						response = Hooks.fsMonitor(repository, executable,
@@ -394,7 +455,8 @@ public final class FsMonitor {
 							throw failure;
 						}
 						queryVersion = 1;
-						since = token != null && version == 1 ? token : timestamp;
+						since = token != null && (version == 1
+								|| storedQuery && token.matches("[0-9]+")) ? token : timestamp; //$NON-NLS-1$
 						response = Hooks.fsMonitor(repository, executable, 1,
 								since).call();
 					}
@@ -430,14 +492,15 @@ public final class FsMonitor {
 						return null;
 					}
 					boolean sameContext = key.equals(fingerprint)
-							&& version == queryVersion;
+							&& (storedQuery || version == queryVersion);
 					// The supplied hook can return an ephemeral zero-epoch
 					// clock
 					// when its daemon is unavailable. Such a reply cannot
 					// validate
 					// cached data, even if it lists only Git metadata.
 					boolean sameInstance = queryVersion == 1
-							? token != null && version == 1
+							? token != null && (version == 1 || storedQuery)
+									&& token.matches("[0-9]+") //$NON-NLS-1$
 									&& Long.compareUnsigned(
 											Long.parseUnsignedLong(timestamp),
 											Long.parseUnsignedLong(token)) >= 0
@@ -494,7 +557,7 @@ public final class FsMonitor {
 	}
 
 	private static boolean sameMonitorInstance(String before, String after) {
-		if (before == null) {
+		if (before == null || before.isEmpty() || after.isEmpty()) {
 			return false;
 		}
 		if (!before.startsWith("c:") && !after.startsWith("c:")) { //$NON-NLS-1$ //$NON-NLS-2$
@@ -633,6 +696,45 @@ public final class FsMonitor {
 			}
 		}
 		return HexFormat.of().formatHex(md.digest());
+	}
+
+	private record IndexDigest(String fingerprint, byte[] checksum) {
+	}
+
+	private static IndexDigest digestIndex(Path file) throws Exception {
+		if (!Files.exists(file)) {
+			return new IndexDigest("absent", new byte[0]); //$NON-NLS-1$
+		}
+		MessageDigest full = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
+		MessageDigest payload = Constants.newMessageDigest();
+		int footerSize = Constants.OBJECT_ID_LENGTH;
+		byte[] buffer = new byte[64 * 1024 + footerSize];
+		int retained = 0;
+		try (InputStream in = Files.newInputStream(file)) {
+			for (int n; (n = in.read(buffer, retained,
+					buffer.length - retained)) != -1;) {
+				full.update(buffer, retained, n);
+				int available = retained + n;
+				int content = Math.max(0, available - footerSize);
+				payload.update(buffer, 0, content);
+				retained = available - content;
+				System.arraycopy(buffer, content, buffer, 0, retained);
+			}
+		}
+		if (retained != footerSize) {
+			throw new IOException("Truncated index footer"); //$NON-NLS-1$
+		}
+		byte[] checksum = payload.digest();
+		boolean zero = true;
+		for (int i = 0; i < footerSize; i++) {
+			zero &= buffer[i] == 0;
+		}
+		// Zero skipHash footers do not replace the computed payload checksum.
+		if (!zero && !Arrays.equals(checksum,
+				Arrays.copyOf(buffer, footerSize))) {
+			throw new IOException("Invalid index checksum"); //$NON-NLS-1$
+		}
+		return new IndexDigest(HexFormat.of().formatHex(full.digest()), checksum);
 	}
 
 

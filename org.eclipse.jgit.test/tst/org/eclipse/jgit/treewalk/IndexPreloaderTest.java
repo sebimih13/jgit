@@ -19,6 +19,8 @@ import java.io.File;
 import java.nio.file.Files;
 import java.util.Map;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -106,6 +108,47 @@ public class IndexPreloaderTest extends RepositoryTestCase {
 				.takeDirectory(new File(trash, "dir"));
 		assertEquals(1000, entries.size());
 		assertEquals(4, entries.get("f0000").getLength());
+		assertNull(result.takeDirectory(new File(trash, "dir")));
+	}
+
+	@Test
+	public void monitorValidatedEntriesAvoidStatsDuringParallelPreload()
+			throws Exception {
+		Assume.assumeTrue(db.getFS() instanceof FS_POSIX);
+		DirCache index = index(1000, true);
+		Set<DirCacheEntry> trusted = new HashSet<>();
+		for (int i = 0; i < index.getEntryCount(); i++) {
+			DirCacheEntry entry = index.getEntry(i);
+			if (i != 0 && i != 999) {
+				entry.setLength(42);
+				trusted.add(entry);
+			}
+		}
+		AtomicInteger leaves = new AtomicInteger();
+		FS_POSIX fs = new FS_POSIX() {
+			@Override
+			public Attributes getAttributes(File file) {
+				if (file.getName().startsWith("f")) {
+					assertTrue("Trusted entries must not be statted",
+							file.getName().equals("f0000")
+									|| file.getName().equals("f0999"));
+					leaves.incrementAndGet();
+				}
+				return super.getAttributes(file);
+			}
+		};
+		IndexPreloader monitored = IndexPreloader.fromMonitor(db, fs, trusted);
+		IndexPreloader result = IndexPreloader.load(db, fs, index, null,
+				monitored, trusted);
+		assertNotNull(result);
+		assertEquals(2, leaves.get());
+		Map<String, FS.Attributes> entries = result
+				.takeDirectory(new File(trash, "dir"));
+		assertEquals(1000, entries.size());
+		assertEquals(4, entries.get("f0000").getLength());
+		assertEquals(4, entries.get("f0999").getLength());
+		assertEquals(42, entries.get("f0001").getLength());
+		assertEquals(42, entries.get("f0998").getLength());
 		assertNull(result.takeDirectory(new File(trash, "dir")));
 	}
 

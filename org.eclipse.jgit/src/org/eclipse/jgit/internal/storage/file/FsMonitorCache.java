@@ -47,7 +47,9 @@ public final class FsMonitorCache {
 	}
 
 	private FsMonitorCache(int version, byte[] token, BitSet dirtyEntries) {
-		if (token.length == 0 || token.length > MAX_EXTENSION_SIZE - 25) {
+		// Native Git can persist an empty token after a failed v2 hook. It
+		// represents storage state, never an accepted provider response.
+		if (token.length > MAX_EXTENSION_SIZE - 25) {
 			throw new IllegalArgumentException(
 					"Invalid fsmonitor token length"); //$NON-NLS-1$
 		}
