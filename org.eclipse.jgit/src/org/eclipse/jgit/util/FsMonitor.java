@@ -115,6 +115,31 @@ public final class FsMonitor {
 	 * @param forceContentCheck whether failed correlation needs content checks
 	 */
 	public record IndexQuery(Probe probe, boolean forceContentCheck) {
+		/**
+		 * Apply provider invalidation before consuming native directory records.
+		 * This changes only the operation-local model, never the index file.
+		 * @param repository repository queried
+		 * @param index matching index to scan
+		 * @throws IOException for unsafe notification paths
+		 * @since 7.8
+		 */
+		public void invalidateUntrackedCache(Repository repository, DirCache index)
+				throws IOException {
+			var cache = index.getUntrackedCache();
+			if (cache == null || !isConfigured(repository)) {
+				return;
+			}
+			if (forceContentCheck || probe == null || !probe.validatesIndex(index)
+					|| probe.invalidationScopeUnknown
+					|| repository.getConfig().getBoolean("core", null, "ignoreCase", false)) { //$NON-NLS-1$ //$NON-NLS-2$
+				cache.invalidateAll();
+				return;
+			}
+			for (String path : probe.changedPaths) {
+				cache.invalidateWorkingTreePath(Constants.encode(path.endsWith("/") //$NON-NLS-1$
+						? path.substring(0, path.length() - 1) : path));
+			}
+		}
 	}
 
 	/**
@@ -156,6 +181,19 @@ public final class FsMonitor {
 				"fsmonitor"); //$NON-NLS-1$
 		return hook != null ? hook
 				: SystemReader.getInstance().getenv("GIT_TEST_FSMONITOR"); //$NON-NLS-1$
+	}
+
+	/**
+	 * Whether a hook or daemon is configured, including unavailable providers.
+	 * Unavailable providers still require conservative cache publication.
+	 * @param repository repository to inspect
+	 * @return whether monitoring is configured
+	 * @since 7.8
+	 */
+	public static boolean isConfigured(Repository repository) {
+		String value = configuredHook(repository);
+		return value != null && !value.isEmpty()
+				&& !Boolean.FALSE.equals(UntrackedCacheConfig.parseBoolean(value));
 	}
 
 	/**

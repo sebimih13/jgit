@@ -15,6 +15,7 @@ import org.eclipse.jgit.internal.storage.file.FsMonitorCacheTest;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheTest;
 import org.eclipse.jgit.treewalk.IndexPreloaderTest;
 import org.eclipse.jgit.treewalk.UntrackedDirectoryListingTest;
+import org.eclipse.jgit.treewalk.UntrackedCachePopulationTest;
 import org.eclipse.jgit.util.FsMonitorIndexQueryTest;
 import org.eclipse.jgit.util.FsMonitorInitializationTest;
 import org.eclipse.jgit.util.FsMonitorWriterRefreshTest;
@@ -28,6 +29,7 @@ import org.junit.runners.Suite;
 		FsMonitorIndexQueryTest.class, FsMonitorInitializationTest.class,
 		FsMonitorCacheTest.class, FsMonitorWriterRefreshTest.class,
 		UntrackedCacheTest.class, UntrackedDirectoryListingTest.class,
+		UntrackedCachePopulationTest.class,
 		PreloadIndexCommandTest.class, IndexPreloaderTest.class,
 		IndexSkipHashTest.class, NativeIndexVersionTest.class })
 public class NativeCacheOptionsSuite {

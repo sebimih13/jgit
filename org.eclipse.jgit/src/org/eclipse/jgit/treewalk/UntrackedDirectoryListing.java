@@ -358,31 +358,39 @@ final class UntrackedDirectoryListing {
 	}
 
 	private static boolean matchesExclude(Path file, ObjectId expected) throws IOException {
+		byte[] bytes = readExclude(file);
+		return bytes == null ? ObjectId.zeroId().equals(expected)
+				: excludeId(bytes, false).equals(expected)
+						|| bytes.length != 0 && excludeId(bytes, true).equals(expected);
+	}
+
+	static byte[] readExclude(Path file) throws IOException {
 		if (file == null || !Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
-			return ObjectId.zeroId().equals(expected);
+			return null;
 		}
 		if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
 				|| Files.size(file) > 1024 * 1024) {
 			throw new IOException("Unsupported exclusion file"); //$NON-NLS-1$
 		}
-		try (ObjectInserter.Formatter formatter = new ObjectInserter.Formatter()) {
-			byte[] bytes;
-			try (var input = Files.newInputStream(file)) {
-				bytes = input.readNBytes(1024 * 1024 + 1);
-			}
+		try (var input = Files.newInputStream(file)) {
+			byte[] bytes = input.readNBytes(1024 * 1024 + 1);
 			if (bytes.length > 1024 * 1024) {
 				throw new IOException("Exclusion file exceeds cache limit"); //$NON-NLS-1$
 			}
-			if (formatter.idFor(Constants.OBJ_BLOB, bytes).equals(expected)) {
-				return true;
-			}
-			// Native add_patterns appends LF before hashing an untracked
-			// exclusion file. It can instead reuse a tracked file's index OID.
-			// The extra empty final line does not change ignore semantics.
-			byte[] terminated = Arrays.copyOf(bytes, bytes.length + 1);
-			terminated[bytes.length] = '\n';
-			return bytes.length != 0 && formatter.idFor(Constants.OBJ_BLOB,
-					terminated).equals(expected);
+			return bytes;
+		}
+	}
+
+	static ObjectId excludeId(byte[] bytes, boolean appendLf) {
+		if (bytes == null) {
+			return ObjectId.zeroId();
+		}
+		if (appendLf && bytes.length != 0) {
+			bytes = Arrays.copyOf(bytes, bytes.length + 1);
+			bytes[bytes.length - 1] = '\n';
+		}
+		try (ObjectInserter.Formatter formatter = new ObjectInserter.Formatter()) {
+			return formatter.idFor(Constants.OBJ_BLOB, bytes);
 		}
 	}
 
@@ -437,34 +445,39 @@ final class UntrackedDirectoryListing {
 			return null;
 		}
 		try {
-			Map<String, Object> values = Files.readAttributes(path,
-					"unix:ctime,lastModifiedTime,dev,ino,uid,gid,size,isDirectory", //$NON-NLS-1$
-					LinkOption.NOFOLLOW_LINKS);
-			if (!Boolean.TRUE.equals(values.get("isDirectory"))) { //$NON-NLS-1$
+			Stat observed = stat(path);
+			// Reject the whole timestamp second, including native builds
+			// without nanosecond racy checks.
+			if (!observed.directory() || observed.modified().getEpochSecond()
+					>= indexTime.getEpochSecond()) {
 				return null;
 			}
-			Instant ctime = ((FileTime) values.get("ctime")).toInstant(); //$NON-NLS-1$
-			Instant mtime = ((FileTime) values.get("lastModifiedTime")) //$NON-NLS-1$
-					.toInstant();
-			// Conservatively reject the whole timestamp second, including
-			// native builds that do not use nanosecond racy checks.
-			if (mtime.getEpochSecond() >= indexTime.getEpochSecond()) {
-				return null;
-			}
-			long size = ((Number) values.get("size")).longValue(); //$NON-NLS-1$
-			int encodedSize = (int) size;
-			if (encodedSize == 0 && size != 0) {
-				encodedSize = 0x80000000;
-			}
-			int[] stat = { (int) ctime.getEpochSecond(), ctime.getNano(),
-					(int) mtime.getEpochSecond(), mtime.getNano(),
-					((Number) values.get("dev")).intValue(), //$NON-NLS-1$
-					((Number) values.get("ino")).intValue(), //$NON-NLS-1$
-					((Number) values.get("uid")).intValue(), //$NON-NLS-1$
-					((Number) values.get("gid")).intValue(), encodedSize }; //$NON-NLS-1$
-			return Arrays.equals(stat, node.stat.fields) ? stat : null;
+			return Arrays.equals(observed.fields(), node.stat.fields)
+					? observed.fields() : null;
 		} catch (IOException | RuntimeException unsupported) {
 			return null;
 		}
+	}
+
+	record Stat(int[] fields, Instant modified, boolean directory) { }
+
+	static Stat stat(Path path) throws IOException {
+		Map<String, Object> values = Files.readAttributes(path,
+				"unix:ctime,lastModifiedTime,dev,ino,uid,gid,size,isDirectory", //$NON-NLS-1$
+				LinkOption.NOFOLLOW_LINKS);
+		Instant ctime = ((FileTime) values.get("ctime")).toInstant(); //$NON-NLS-1$
+		Instant mtime = ((FileTime) values.get("lastModifiedTime")).toInstant(); //$NON-NLS-1$
+		long size = ((Number) values.get("size")).longValue(); //$NON-NLS-1$
+		int encodedSize = (int) size;
+		if (encodedSize == 0 && size != 0) {
+			encodedSize = 0x80000000;
+		}
+		int[] fields = { (int) ctime.getEpochSecond(), ctime.getNano(),
+				(int) mtime.getEpochSecond(), mtime.getNano(),
+				((Number) values.get("dev")).intValue(), //$NON-NLS-1$
+				((Number) values.get("ino")).intValue(), //$NON-NLS-1$
+				((Number) values.get("uid")).intValue(), //$NON-NLS-1$
+				((Number) values.get("gid")).intValue(), encodedSize }; //$NON-NLS-1$
+		return new Stat(fields, mtime, Boolean.TRUE.equals(values.get("isDirectory"))); //$NON-NLS-1$
 	}
 }

@@ -22,8 +22,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
 import java.util.Collection;
-import java.util.Set;
 import java.util.Map;
+import java.util.Set;
 
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheEntry;
@@ -33,6 +33,7 @@ import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ObjectReader;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FS_POSIX;
 
@@ -59,6 +60,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 
 	private UntrackedDirectoryListing untrackedListing;
 
+	private UntrackedCacheScan untrackedScan;
+
 	/**
 	 * the file system abstraction which will be necessary to perform certain
 	 * file system operations.
@@ -81,10 +84,23 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 *            the repository whose working tree will be scanned.
 	 */
 	public FileTreeIterator(Repository repo) {
-		this(repo,
-				repo.getConfig().get(WorkingTreeOptions.KEY).isDirNoGitLinks() ?
-						NoGitlinksStrategy.INSTANCE :
-						DefaultFileModeStrategy.INSTANCE);
+		this(repo, defaultStrategy(repo));
+	}
+
+	private static FileModeStrategy defaultStrategy(Repository repo) {
+		return repo.getConfig().get(WorkingTreeOptions.KEY).isDirNoGitLinks()
+				? NoGitlinksStrategy.INSTANCE : DefaultFileModeStrategy.INSTANCE;
+	}
+
+	/**
+	 * Create a walk optionally recording native all-mode cache inputs.
+	 * Recording alone does not write the index.
+	 * @param repo repository to scan
+	 * @param recordUntrackedCache whether to capture a complete traversal
+	 * @since 7.8
+	 */
+	public FileTreeIterator(Repository repo, boolean recordUntrackedCache) {
+		this(repo, defaultStrategy(repo), recordUntrackedCache);
 	}
 
 	/**
@@ -98,9 +114,17 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 * @since 4.3
 	 */
 	public FileTreeIterator(Repository repo, FileModeStrategy fileModeStrategy) {
-		this(repo.getWorkTree(), repo.getFS(),
-				repo.getConfig().get(WorkingTreeOptions.KEY),
-				fileModeStrategy);
+		this(repo, fileModeStrategy, false);
+	}
+
+	private FileTreeIterator(Repository repo, FileModeStrategy strategy, boolean record) {
+		super(repo.getConfig().get(WorkingTreeOptions.KEY));
+		directory = repo.getWorkTree();
+		fs = repo.getFS();
+		fileModeStrategy = strategy;
+		untrackedScan = record && getClass() == FileTreeIterator.class
+				? UntrackedCacheScan.create(repo) : null;
+		init(entries());
 		initRootIterator(repo);
 	}
 
@@ -189,6 +213,7 @@ public class FileTreeIterator extends WorkingTreeIterator {
 		if (p instanceof FileTreeIterator) {
 			preloaded = ((FileTreeIterator) p).preloaded;
 			untrackedListing = ((FileTreeIterator) p).untrackedListing;
+			untrackedScan = ((FileTreeIterator) p).untrackedScan;
 		}
 		init(entries());
 	}
@@ -223,7 +248,7 @@ public class FileTreeIterator extends WorkingTreeIterator {
 
 	/**
 	 * Preload tracked metadata for this walk when core.preloadIndex is
-	 * explicitly enabled. The index is not modified. Metadata is discarded with
+	 * enabled (the default). The index is not modified. Metadata is discarded with
 	 * this walk; existing content and racy-timestamp checks still apply.
 	 *
 	 * @param index
@@ -233,13 +258,26 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 * @since 7.8
 	 */
 	public void preloadIndex(DirCache index, ProgressMonitor monitor) {
+		preloadIndex(index, monitor, TreeFilter.ALL);
+	}
+
+	/**
+	 * Preload tracked metadata within the supplied filter's available path bounds.
+	 * Filters without path bounds retain the ordinary walk. The filter itself
+	 * is never evaluated by worker threads.
+	 * @param index already loaded index
+	 * @param monitor cancellation monitor, or null
+	 * @param filter path filter, or null for the whole index
+	 * @since 7.8
+	 */
+	public void preloadIndex(DirCache index, ProgressMonitor monitor, TreeFilter filter) {
 		preloaded = monitorMetadata;
 		Repository repo = getRepository();
 		// Preserve custom FS.list implementations and Win32 enumeration,
 		// which already supplies file attributes.
 		if (repo != null && fs.getClass() == FS_POSIX.class && repo.getConfig()
-				.getBoolean("core", null, "preloadIndex", false)) { //$NON-NLS-1$ //$NON-NLS-2$
-			preloaded = IndexPreloader.load(repo, fs, index, monitor, monitorMetadata, monitorEntries);
+				.getBoolean("core", null, "preloadIndex", true)) { //$NON-NLS-1$ //$NON-NLS-2$
+			preloaded = IndexPreloader.load(repo, fs, index, monitor, monitorMetadata, monitorEntries, filter);
 		}
 	}
 
@@ -277,6 +315,35 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	}
 
 	/**
+	 * Attempt to publish a completed recorded traversal without replacing a
+	 * newer index. Ordinary iterators do not record or publish cache state.
+	 * @param index index used by the scan
+	 * @param untracked complete untracked path set
+	 * @param monitor cancellation monitor, or null
+	 * @return whether an updated index was committed
+	 * @since 7.8
+	 */
+	public boolean updateUntrackedCache(DirCache index, Set<String> untracked,
+			ProgressMonitor monitor) {
+		return updateUntrackedCache(index, untracked, Set.of(), monitor);
+	}
+
+	/**
+	 * Publish a complete scan and its verified clean tracked paths. Later
+	 * writer notifications keep affected entries dirty despite this verification.
+	 * @param index index used by the scan
+	 * @param untracked complete untracked path set
+	 * @param verified clean tracked paths verified against this index
+	 * @param monitor cancellation monitor, or null
+	 * @return whether an updated index was committed
+	 * @since 7.8
+	 */
+	public boolean updateUntrackedCache(DirCache index, Set<String> untracked,
+			Set<String> verified, ProgressMonitor monitor) {
+		return untrackedScan != null && untrackedScan.publish(index, untracked, verified, monitor);
+	}
+
+	/**
 	 * Finish a successful full walk, retaining only a negative optimization
 	 * hint when none of the native directory records could be reused.
 	 * No index or filesystem data is written.
@@ -296,7 +363,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 		if (attributes == null && fs.getClass() != FS_POSIX.class) {
 			return fs.list(directory, fileModeStrategy);
 		}
-		File[] files = untrackedListing == null ? directory.listFiles()
+		File[] files = untrackedScan != null ? untrackedScan.list(directory, untrackedListing)
+				: untrackedListing == null ? directory.listFiles()
 				: untrackedListing.list(directory);
 		if (files == null) {
 			return new Entry[0];
@@ -321,9 +389,14 @@ public class FileTreeIterator extends WorkingTreeIterator {
 					continue;
 				}
 			}
-			result[count++] = cached == null
+			FileEntry entry = cached == null
 					? new FileEntry(file, fs, fileModeStrategy)
 					: new FileEntry(file, fs, cached, fileModeStrategy);
+			result[count++] = entry;
+			if (untrackedScan != null) {
+				untrackedScan.entry(file, entry.getMode() == FileMode.TREE
+						|| entry.getMode() == FileMode.GITLINK, entry.attributes.exists());
+			}
 		}
 		return count == result.length ? result : java.util.Arrays.copyOf(result, count);
 	}

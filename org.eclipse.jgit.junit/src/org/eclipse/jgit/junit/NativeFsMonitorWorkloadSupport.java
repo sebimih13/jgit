@@ -396,8 +396,22 @@ public final class NativeFsMonitorWorkloadSupport {
 				System.getProperty("jgit.test.gitExecutable", "git"),
 				"-c", "core.fsmonitor=false", "-c",
 				"core.untrackedCache=false"));
-		if (!allowIndexRefresh)
+		if (!allowIndexRefresh) {
 			command.add(1, "--no-optional-locks");
+			if (index == null) {
+				// Native diff refreshes stat fields even with optional locks off.
+				// Preserve its normal semantics on a private index instead of
+				// disabling refresh (which can report every JGit stat as dirty).
+				index = repository.getDirectory().toPath().resolve("native-p7519-readonly.index");
+				if (repository.getIndexFile().isFile()) {
+					Files.copy(repository.getIndexFile().toPath(), index,
+							java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+							java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
+				} else {
+					Files.deleteIfExists(index);
+				}
+			}
+		}
 		command.addAll(List.of(arguments));
 		Path output = repository.getDirectory().toPath().resolve("native-p7519.out");
 		Path errors = repository.getDirectory().toPath().resolve("native-p7519.err");

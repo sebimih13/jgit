@@ -39,6 +39,20 @@ import org.junit.Test;
 
 public class UntrackedDirectoryListingTest extends RepositoryTestCase {
 	@Test
+	public void ignoredStagedDeletionIsNotAlsoUntracked() throws Exception {
+		prepare("all");
+		writeTrashFile("sub/.gitignore", "tracked\n*.tmp\n");
+		try (Git git = Git.wrap(db)) {
+			git.rm().setCached(true).addFilepattern("sub/tracked").call();
+			Status status = git.status().setReportIgnored(false).call();
+			assertEquals(Set.of("sub/tracked"), status.getRemoved());
+			assertTrue(!status.getUntracked().contains("sub/tracked"));
+		}
+		byte[] output = org.eclipse.jgit.junit.NativeFsMonitorIndexSupport.status(db, false);
+		assertTrue(new String(output, StandardCharsets.UTF_8).contains("D  sub/tracked\0"));
+		assertTrue(!new String(output, StandardCharsets.UTF_8).contains("?? sub/tracked\0"));
+	}
+	@Test
 	public void nativeAllRecordsServeColdWalkWithoutIgnoredResults()
 			throws Exception {
 		prepare("all");
@@ -57,10 +71,20 @@ public class UntrackedDirectoryListingTest extends RepositoryTestCase {
 			listing = UntrackedDirectoryListing.create(fresh, index, true);
 			assertTrue(names(listing.list(sub())).contains("hidden.tmp"));
 			assertEquals(1, index.getUntrackedCache().dirOpened);
-			try (Git git = Git.wrap(fresh)) {
+			// A separate repository also keeps the API's first scan cold after
+			// the complete-listing control above.
+			try (var cold = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+					.setGitDir(db.getDirectory()).build(); Git git = Git.wrap(cold)) {
 				Status compact = git.status().setReportIgnored(false).call();
 				Status complete = git.status().call();
+				assertEquals(complete.getAdded(), compact.getAdded());
+				assertEquals(complete.getChanged(), compact.getChanged());
+				assertEquals(complete.getRemoved(), compact.getRemoved());
+				assertEquals(complete.getMissing(), compact.getMissing());
+				assertEquals(complete.getModified(), compact.getModified());
+				assertEquals(complete.getConflictingStageState(), compact.getConflictingStageState());
 				assertEquals(complete.getUntracked(), compact.getUntracked());
+				assertEquals(complete.getUntrackedFolders(), compact.getUntrackedFolders());
 				assertTrue(compact.getIgnoredNotInIndex().isEmpty());
 				assertEquals(Set.of("sub/hidden.tmp"), complete.getIgnoredNotInIndex());
 			}

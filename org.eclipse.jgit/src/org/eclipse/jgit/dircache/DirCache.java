@@ -447,6 +447,49 @@ public class DirCache {
 	}
 
 	/**
+	 * Install a complete scan's untracked cache without losing notifications
+	 * consumed when this index was locked. Unknown scope invalidates all scan
+	 * records; known scope invalidates affected directories and their cones.
+	 * The caller must first verify that its scanned index checksum still matches.
+	 *
+	 * @param cache cache built by a complete scan
+	 * @param verified clean tracked paths verified against the scanned index
+	 * @throws IOException for unsafe notification paths
+	 * @throws IllegalStateException unless locked through a repository
+	 * @since 7.8
+	 */
+	public void setUntrackedCacheAfterScan(UntrackedCache cache, Set<String> verified) throws IOException {
+		requireLocked(myLock);
+		if (repository == null) {
+			throw new IllegalStateException("Repository-aware index lock required"); //$NON-NLS-1$
+		}
+		if (cache != null && FsMonitor.isConfigured(repository)) {
+			if (fsMonitorPaths == null) {
+				cache.invalidateAll();
+			} else {
+				for (String path : fsMonitorPaths) {
+					cache.invalidateWorkingTreePath(Constants.encode(path));
+				}
+			}
+		}
+		if (fsMonitorCache != null && fsMonitorPaths != null) {
+			for (String path : verified) {
+				boolean notified = fsMonitorPaths.contains(path);
+				for (int slash = path.lastIndexOf('/'); !notified && slash >= 0;
+						slash = path.lastIndexOf('/', slash - 1)) {
+					notified = fsMonitorPaths.contains(path.substring(0, slash));
+				}
+				DirCacheEntry entry = getEntry(path);
+				if (!notified && entry != null && entry.getStage() == 0
+						&& !entry.isAssumeValid() && !entry.isSkipWorkTree()) {
+					markFsMonitorValid(entry);
+				}
+			}
+		}
+		setUntrackedCache(cache);
+	}
+
+	/**
 	 * Digest of the index payload validated during the last read. This is the
 	 * computed SHA-1 even when the stored footer is zero (index.skipHash).
 	 * @return a copy of the read checksum

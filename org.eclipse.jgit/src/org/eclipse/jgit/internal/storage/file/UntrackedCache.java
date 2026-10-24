@@ -507,6 +507,40 @@ public final class UntrackedCache {
 	 * change.
 	 */
 	public void invalidateAll() {
+		invalidateSubtree(root);
+	}
+
+	/**
+	 * Invalidate a notification consumed after a full working-tree scan.
+	 * Besides the containing directory, invalidate an existing directory cone
+	 * with this name: index-event paths do not retain a trailing slash.
+	 *
+	 * @param path validated worktree-relative notification
+	 * @throws IOException for unsafe path components
+	 * @since 7.8
+	 */
+	public void invalidateWorkingTreePath(byte[] path) throws IOException {
+		invalidatePath(path);
+		Directory node = root;
+		int start = 0;
+		for (int i = 0; node != null && i <= path.length; i++) {
+			if (i == path.length || path[i] == '/') {
+				byte[] component = Arrays.copyOfRange(path, start, i);
+				Directory match = null;
+				for (Directory child : node.directories) {
+					if (Arrays.equals(child.name, component)) {
+						match = child;
+						break;
+					}
+				}
+				node = match;
+				start = i + 1;
+			}
+		}
+		invalidateSubtree(node);
+	}
+
+	private static void invalidateSubtree(Directory root) {
 		if (root == null) {
 			return;
 		}

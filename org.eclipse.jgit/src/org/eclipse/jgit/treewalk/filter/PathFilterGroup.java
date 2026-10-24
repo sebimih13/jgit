@@ -126,6 +126,12 @@ public class PathFilterGroup {
 		}
 
 		@Override
+		@SuppressWarnings("deprecation")
+		public Optional<Set<byte[]>> getPathsBestEffort() {
+			return path.getPathsBestEffort();
+		}
+
+		@Override
 		public boolean include(TreeWalk walker) {
 			final int cmp = walker.isPathPrefix(raw, raw.length);
 			if (cmp > 0)

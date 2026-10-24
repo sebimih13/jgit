@@ -506,16 +506,12 @@ public class DiffFormatter implements AutoCloseable {
 			throws IOException {
 		assertHaveReader();
 
-		if (pathFilter == TreeFilter.ALL) {
-			if (a instanceof FileTreeIterator
-					&& b instanceof DirCacheIterator) {
-				((FileTreeIterator) a).preloadIndex(
-						((DirCacheIterator) b).getDirCache(), progressMonitor);
-			} else if (b instanceof FileTreeIterator
-					&& a instanceof DirCacheIterator) {
-				((FileTreeIterator) b).preloadIndex(
-						((DirCacheIterator) a).getDirCache(), progressMonitor);
-			}
+		if (a instanceof FileTreeIterator && b instanceof DirCacheIterator) {
+			((FileTreeIterator) a).preloadIndex(((DirCacheIterator) b).getDirCache(),
+					progressMonitor, pathFilter);
+		} else if (b instanceof FileTreeIterator && a instanceof DirCacheIterator) {
+			((FileTreeIterator) b).preloadIndex(((DirCacheIterator) a).getDirCache(),
+					progressMonitor, pathFilter);
 		}
 		TreeWalk walk = new TreeWalk(repository, reader);
 		int aIndex = walk.addTree(a);

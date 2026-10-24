@@ -28,6 +28,96 @@ import org.eclipse.jgit.treewalk.filter.PathFilter;
 import org.junit.Test;
 
 public class PreloadIndexCommandTest extends RepositoryTestCase {
+	@Test
+	public void nativePreloadDefaultsAndPathBoundsHaveExpectedStatCounters() throws Exception {
+		org.junit.Assume.assumeTrue(db.getFS().getClass() == org.eclipse.jgit.util.FS_POSIX.class);
+		try (Git git = Git.wrap(db)) {
+			populate(git);
+			byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
+			assertEquals(Integer.valueOf(1000), nativePreloadCounter("default-all", null, null));
+			assertEquals(null, nativePreloadCounter("false-all", Boolean.FALSE, null));
+			assertEquals(Integer.valueOf(1), nativePreloadCounter("default-file", null, "dir/f0"));
+			assertEquals(Integer.valueOf(0), nativePreloadCounter("default-prefix", null, "di"));
+			assertArrayEquals(original, Files.readAllBytes(db.getIndexFile().toPath()));
+		}
+	}
+
+	private Integer nativePreloadCounter(String label, Boolean enabled, String path)
+			throws Exception {
+		Path trace = db.getDirectory().toPath().resolve(label + ".jsonl");
+		Path output = db.getDirectory().toPath().resolve(label + ".out");
+		Path error = db.getDirectory().toPath().resolve(label + ".err");
+		var arguments = new java.util.ArrayList<>(List.of(
+				System.getProperty("jgit.test.gitExecutable", "git"), "--no-optional-locks",
+				"-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"));
+		if (enabled != null) arguments.addAll(List.of("-c", "core.preloadIndex=" + enabled));
+		arguments.addAll(List.of("status", "--porcelain=v1", "-z", "--untracked-files=all"));
+		if (path != null) arguments.addAll(List.of("--", path));
+		ProcessBuilder builder = new ProcessBuilder(arguments).directory(db.getWorkTree())
+				.redirectOutput(output.toFile()).redirectError(error.toFile());
+		builder.environment().keySet().removeIf(name -> name.startsWith("GIT_"));
+		builder.environment().put("GIT_CONFIG_GLOBAL", "/dev/null");
+		builder.environment().put("GIT_CONFIG_NOSYSTEM", "1");
+		builder.environment().put("GIT_TRACE2_EVENT", trace.toString());
+		builder.environment().put("GIT_TRACE2_EVENT_NESTING", "20");
+		Process process = builder.start();
+		try {
+			assertTrue(process.waitFor(20, java.util.concurrent.TimeUnit.SECONDS));
+			assertEquals(Files.readString(error), 0, process.exitValue());
+		} finally {
+			process.destroyForcibly();
+		}
+		assertEquals(0, Files.size(output));
+		Integer counter = null;
+		for (String line : Files.readAllLines(trace)) {
+			var event = com.google.gson.JsonParser.parseString(line).getAsJsonObject();
+			if (event.has("key") && "preload/sum_lstat".equals(event.get("key").getAsString())) {
+				assertEquals(null, counter);
+				counter = Integer.valueOf(event.get("value").getAsInt());
+			}
+		}
+		return counter;
+	}
+
+	@Test
+	public void defaultAndExplicitPreloadPreserveFilteredNativeDiffs() throws Exception {
+		try (Git git = Git.wrap(db)) {
+			populate(git);
+			writeTrashFile("dir/white\nspace", "base\n");
+			writeTrashFile("dir-other/file", "base\n");
+			git.add().addFilepattern(".").call();
+			git.commit().setMessage("path boundaries").call();
+			for (String path : List.of("dir/f0", "dir/f999", "dir/white\nspace", "dir-other/file"))
+				writeTrashFile(path, "changed content\n");
+			byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
+			for (Boolean preload : new Boolean[] { null, Boolean.FALSE, Boolean.TRUE }) {
+				if (preload == null) db.getConfig().unset("core", null, "preloadIndex");
+				else enabled(preload.booleanValue());
+				for (String path : List.of("dir", "dir/white\nspace", "dir/f0")) {
+					java.util.Set<String> expected = path.equals("dir")
+							? java.util.Set.of("dir/f0", "dir/f999", "dir/white\nspace")
+							: java.util.Set.of(path);
+					var status = git.status().addPath(path).call();
+					assertEquals(expected, status.getModified());
+					assertTrue(status.getAdded().isEmpty());
+					assertTrue(status.getChanged().isEmpty());
+					assertTrue(status.getRemoved().isEmpty());
+					assertTrue(status.getMissing().isEmpty());
+					assertTrue(status.getUntracked().isEmpty());
+					assertTrue(status.getConflicting().isEmpty());
+					java.util.Set<String> actual = new java.util.HashSet<>();
+					for (var diff : git.diff().setPathFilter(
+							org.eclipse.jgit.treewalk.filter.PathFilterGroup.createFromStrings(path)).call())
+						actual.add(diff.getNewPath());
+					assertEquals(expected, actual);
+					org.eclipse.jgit.junit.NativeFsMonitorWorkloadSupport.assertNativeDiff(db,
+							false, path, expected);
+				}
+			}
+			assertArrayEquals(original, Files.readAllBytes(db.getIndexFile().toPath()));
+		}
+	}
+
 	private void populate(Git git) throws Exception {
 		for (int i = 0; i < 1000; i++)
 			writeTrashFile("dir/f" + i, "base\n");

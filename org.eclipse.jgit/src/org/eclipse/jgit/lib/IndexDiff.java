@@ -232,6 +232,38 @@ public class IndexDiff {
 
 	private boolean reportIgnored = true;
 
+	private boolean completeScan;
+
+	private ProgressMonitor scanMonitor;
+
+	/**
+	 * Publish recorded all-mode traversal data after a complete, uncancelled scan. A normal
+	 * working-tree iterator does not record inputs and leaves the index intact.
+	 * @return whether the optional index update was committed
+	 * @since 7.8
+	 */
+	public boolean updateUntrackedCache() {
+		if (!completeScan || filter != null || reportIgnored
+				|| initialWorkingTreeIterator.getClass() != FileTreeIterator.class) {
+			return false;
+		}
+		Set<String> verified = new HashSet<>();
+		if (FsMonitor.isHookConfigured(repository)) {
+			for (int i = 0; i < dirCache.getEntryCount(); i++) {
+				DirCacheEntry entry = dirCache.getEntry(i);
+				String path = entry.getPathString();
+				if (entry.getStage() == 0 && !entry.isAssumeValid()
+						&& !entry.isSkipWorkTree() && entry.getFileMode() != FileMode.GITLINK
+						&& !dirCache.isFsMonitorValid(i) && !modified.contains(path)
+						&& !missing.contains(path) && !conflicts.containsKey(path)) {
+					verified.add(path);
+				}
+			}
+		}
+		return ((FileTreeIterator) initialWorkingTreeIterator)
+				.updateUntrackedCache(dirCache, untracked, verified, scanMonitor);
+	}
+
 	/**
 	 * Select ignored-path reporting, which is enabled by default. Ignore matching is
 	 * retained when reporting is disabled. Whole-tree scans may then consume
@@ -561,12 +593,15 @@ public class IndexDiff {
 	private boolean diffWithTrace(ProgressMonitor monitor, int estWorkTreeSize,
 			int estIndexSize, String title, RepositoryBuilderFactory factory)
 			throws IOException {
+		completeScan = false;
+		scanMonitor = monitor;
 		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
 				"index", "read")) { //$NON-NLS-1$ //$NON-NLS-2$
 			dirCache = repository.readDirCache();
 			FsMonitor.IndexQuery query = initialWorkingTreeIterator.getClass() == FileTreeIterator.class
 					? FsMonitor.queryStoredIndex(repository, dirCache)
 					: new FsMonitor.IndexQuery(null, false);
+			query.invalidateUntrackedCache(repository, dirCache);
 			FsMonitor.Probe probe = query.probe();
 			if (query.forceContentCheck()) {
 				forceContentCheckPaths = List.of("/"); //$NON-NLS-1$
@@ -585,10 +620,9 @@ public class IndexDiff {
 			((FileTreeIterator) initialWorkingTreeIterator).setUntrackedCache(dirCache,
 					reportIgnored || filter != null);
 		}
-		if (filter == null
-				&& initialWorkingTreeIterator instanceof FileTreeIterator) {
+		if (initialWorkingTreeIterator instanceof FileTreeIterator) {
 			((FileTreeIterator) initialWorkingTreeIterator)
-					.preloadIndex(dirCache, monitor);
+					.preloadIndex(dirCache, monitor, filter);
 		}
 
 		try (TreeWalk treeWalk = new TreeWalk(repository)) {
@@ -660,7 +694,8 @@ public class IndexDiff {
 						if (!isEntryGitLink(treeIterator)
 								|| ignoreSubmoduleMode != IgnoreSubmoduleMode.ALL)
 							removed.add(treeWalk.getPathString());
-						if (workingTreeIterator != null)
+						if (workingTreeIterator != null
+								&& !workingTreeIterator.isEntryIgnored())
 							untracked.add(treeWalk.getPathString());
 					}
 				} else {
@@ -802,6 +837,7 @@ public class IndexDiff {
 			((FileTreeIterator) initialWorkingTreeIterator).finishUntrackedCache();
 		}
 		ignored = reportIgnored ? indexDiffFilter.getIgnoredPaths() : java.util.Set.of();
+		completeScan = monitor == null || !monitor.isCancelled();
 		if (added.isEmpty() && changed.isEmpty() && removed.isEmpty()
 				&& missing.isEmpty() && modified.isEmpty()
 				&& untracked.isEmpty()) {

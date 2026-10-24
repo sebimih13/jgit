@@ -11,6 +11,8 @@ package org.eclipse.jgit.treewalk;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -25,10 +27,13 @@ import java.util.concurrent.TimeoutException;
 
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheEntry;
+import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.eclipse.jgit.util.FS;
+import org.eclipse.jgit.util.SystemReader;
 import org.eclipse.jgit.util.Trace2;
 
 /** Operation-local metadata preload, adapted from C Git's preload-index.c. */
@@ -63,8 +68,35 @@ final class IndexPreloader {
 	static IndexPreloader load(Repository repository, FS fs, DirCache index,
 			ProgressMonitor monitor, IndexPreloader monitored,
 			Set<DirCacheEntry> trusted) {
+		return load(repository, fs, index, monitor, monitored, trusted, TreeFilter.ALL);
+	}
+
+	@SuppressWarnings("deprecation")
+	static IndexPreloader load(Repository repository, FS fs, DirCache index,
+			ProgressMonitor monitor, IndexPreloader monitored,
+			Set<DirCacheEntry> trusted, TreeFilter filter) {
+		if (cancelled(monitor)) {
+			return monitored;
+		}
+		BitSet selected = null;
+		if (filter != null && filter != TreeFilter.ALL) {
+			var paths = filter.getPathsBestEffort();
+			if (paths.isEmpty()) {
+				return monitored;
+			}
+			selected = select(index, paths.get(), monitor);
+			if (selected != null && selected.isEmpty()) {
+				return monitored;
+			}
+		}
+		BitSet eligible = selected;
 		int threads = Math.min(MAX_PARALLEL,
 				index.getEntryCount() / THREAD_COST);
+		if (index.getEntryCount() > 1 && threads < 2
+				&& Boolean.TRUE.equals(UntrackedCacheConfig.parseBoolean(
+						SystemReader.getInstance().getenv("GIT_TEST_PRELOAD_INDEX")))) { //$NON-NLS-1$
+			threads = 2;
+		}
 		if (threads < 2 || cancelled(monitor)) {
 			return monitored;
 		}
@@ -85,7 +117,7 @@ final class IndexPreloader {
 					int end = Math.min(index.getEntryCount(), offset + work);
 					tasks.add(
 							executor.submit(() -> read(repository.getWorkTree(),
-									fs, index, start, end, trusted)));
+									fs, index, start, end, trusted, eligible)));
 				}
 				IndexPreloader result = monitored == null ? new IndexPreloader() : monitored;
 				for (Future<IndexPreloader> task : tasks) {
@@ -131,17 +163,59 @@ final class IndexPreloader {
 		}
 	}
 
+	private static BitSet select(DirCache index, Collection<byte[]> paths,
+			ProgressMonitor monitor) {
+		BitSet selected = new BitSet();
+		for (byte[] path : paths) {
+			if (cancelled(monitor)) {
+				return selected;
+			}
+			int length = path.length;
+			while (length > 0 && path[length - 1] == '/') {
+				length--;
+			}
+			if (length == 0) {
+				return null;
+			}
+			int exact = index.findEntry(path, length);
+			if (exact >= 0) {
+				selected.set(exact);
+			}
+			byte[] prefix = Arrays.copyOf(path, length + 1);
+			prefix[length] = '/';
+			int start = index.findEntry(prefix, prefix.length);
+			if (start < 0) {
+				start = -start - 1;
+			}
+			for (int i = start; i < index.getEntryCount(); i++) {
+				byte[] candidate = index.getEntry(i).getRawPath();
+				if (candidate.length < prefix.length || Arrays.mismatch(prefix, 0,
+						prefix.length, candidate, 0, prefix.length) >= 0) {
+					break;
+				}
+				selected.set(i);
+				if ((i & 255) == 0 && cancelled(monitor)) {
+					return selected;
+				}
+			}
+		}
+		return selected;
+	}
+
 	private static boolean cancelled(ProgressMonitor monitor) {
 		return Thread.currentThread().isInterrupted()
 				|| monitor != null && monitor.isCancelled();
 	}
 
 	private static IndexPreloader read(File root, FS fs, DirCache index,
-			int start, int end, Set<DirCacheEntry> trusted) {
+			int start, int end, Set<DirCacheEntry> trusted, BitSet selected) {
 		IndexPreloader result = new IndexPreloader();
 		Map<File, Boolean> safeDirectories = new HashMap<>();
 		for (int i = start; i < end
 				&& !Thread.currentThread().isInterrupted(); i++) {
+			if (selected != null && !selected.get(i)) {
+				continue;
+			}
 			DirCacheEntry entry = index.getEntry(i);
 			if (trusted.contains(entry) || entry.getStage() != 0 || entry.isAssumeValid()
 					|| entry.isSkipWorkTree()

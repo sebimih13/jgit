@@ -62,6 +62,23 @@ public class StatusCommand extends GitCommand<Status> {
 
 	private boolean reportIgnored = true;
 
+	private boolean updateUntrackedCache;
+
+	/**
+	 * Enable best-effort native UNTR publication after a complete scan.
+	 * The default is read-only. Publication requires ignored reporting disabled,
+	 * status.showUntrackedFiles=all, an enabled/existing cache, optional locks
+	 * permitted, and a supported filesystem. Hook notifications consumed by the
+	 * writer invalidate affected scan records. Partial or cancelled scans never write.
+	 * @param update whether to attempt an optional cache update
+	 * @return this command
+	 * @since 7.8
+	 */
+	public StatusCommand setUpdateUntrackedCache(boolean update) {
+		updateUntrackedCache = update;
+		return this;
+	}
+
 	/**
 	 * Select whether ignored paths are included in this status result. Omitting them
 	 * permits native untracked-directory cache reuse; ignore rules still apply
@@ -221,8 +238,11 @@ public class StatusCommand extends GitCommand<Status> {
 
 	private Status scanStatus(FsMonitor.Probe probe, boolean forceContentCheck,
 			boolean untrackedOnly) throws GitAPIException, NoWorkTreeException {
-		if (workingTreeIt == null)
-			workingTreeIt = new FileTreeIterator(repo);
+		if (workingTreeIt == null) {
+			workingTreeIt = updateUntrackedCache && !reportIgnored && paths == null
+					&& ignoreSubmoduleMode == null && !untrackedOnly
+						? new FileTreeIterator(repo, true) : new FileTreeIterator(repo);
+		}
 
 		try {
 			IndexDiff diff = new IndexDiff(repo, Constants.HEAD, workingTreeIt);
@@ -255,6 +275,9 @@ public class StatusCommand extends GitCommand<Status> {
 			else
 				diff.diff(progressMonitor, ProgressMonitor.UNKNOWN,
 						ProgressMonitor.UNKNOWN, ""); //$NON-NLS-1$
+			if (updateUntrackedCache) {
+				diff.updateUntrackedCache();
+			}
 			return new Status(diff);
 		} catch (IOException e) {
 			throw new JGitInternalException(e.getMessage(), e);

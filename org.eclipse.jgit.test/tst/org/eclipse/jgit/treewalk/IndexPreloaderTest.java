@@ -37,6 +37,21 @@ import org.junit.Assume;
 import org.junit.Test;
 
 public class IndexPreloaderTest extends RepositoryTestCase {
+	@Test
+	public void nativeDefaultEnablesPreloadAndExplicitFalseDisablesIt() throws Exception {
+		Assume.assumeTrue(db.getFS().getClass() == FS_POSIX.class);
+		DirCache entries = index(1000, true);
+		var field = FileTreeIterator.class.getDeclaredField("preloaded");
+		field.setAccessible(true);
+		FileTreeIterator enabled = new FileTreeIterator(db);
+		enabled.preloadIndex(entries, null);
+		assertNotNull("C Git enables core.preloadIndex by default", field.get(enabled));
+		db.getConfig().setBoolean("core", null, "preloadIndex", false);
+		FileTreeIterator disabled = new FileTreeIterator(db);
+		disabled.preloadIndex(entries, null);
+		assertNull(field.get(disabled));
+	}
+
 	private DirCache index(int size, boolean files) throws Exception {
 		if (files)
 			Files.createDirectories(trash.toPath().resolve("dir"));
@@ -65,6 +80,76 @@ public class IndexPreloaderTest extends RepositoryTestCase {
 			}
 		};
 		assertNull(IndexPreloader.load(db, failure, index(999, false), null));
+	}
+
+	@Test
+	public void nativeTestOverrideForcesSmallIndexWorkers() throws Exception {
+		mockSystemReader.setProperty("GIT_TEST_PRELOAD_INDEX", "true");
+		try {
+			IndexPreloader result = IndexPreloader.load(db, db.getFS(), index(2, true), null);
+			assertNotNull(result);
+			assertEquals(2, result.takeDirectory(new File(trash, "dir")).size());
+			assertNull(IndexPreloader.load(db, db.getFS(), index(1, false), null));
+		} finally {
+			mockSystemReader.setProperty("GIT_TEST_PRELOAD_INDEX", null);
+		}
+	}
+
+	@Test
+	public void pathGroupsPreloadOnlySelectedFiles() throws Exception {
+		DirCache entries = index(1000, true);
+		for (Set<String> names : List.of(Set.of("f0001"), Set.of("f0000", "f0999"))) {
+			AtomicInteger stats = new AtomicInteger();
+			FS_POSIX fs = new FS_POSIX() {
+				@Override
+				public Attributes getAttributes(File file) {
+					if (file.getName().startsWith("f")) {
+						assertTrue("Unselected path " + file, names.contains(file.getName()));
+						stats.incrementAndGet();
+					}
+					return super.getAttributes(file);
+				}
+			};
+			var filter = org.eclipse.jgit.treewalk.filter.PathFilterGroup.createFromStrings(
+					names.stream().map(name -> "dir/" + name).toList());
+			IndexPreloader result = IndexPreloader.load(db, fs, entries, null,
+					null, Set.of(), filter);
+			assertNotNull(result);
+			assertEquals(names.size(), stats.get());
+			assertEquals(names, result.takeDirectory(new File(trash, "dir")).keySet());
+		}
+	}
+
+	@Test
+	public void directorySelectionRequiresAPathComponentBoundary() throws Exception {
+		DirCache entries = index(1000, true);
+		FS_POSIX fail = new FS_POSIX() {
+			@Override
+			public Attributes getAttributes(File file) {
+				throw new AssertionError("Unselected subtree must not be statted");
+			}
+		};
+		for (String path : List.of("di", "dir/f000", "missing")) {
+			assertNull(IndexPreloader.load(db, fail, entries, null, null, Set.of(),
+					org.eclipse.jgit.treewalk.filter.PathFilter.create(path)));
+		}
+		IndexPreloader selected = IndexPreloader.load(db, db.getFS(), entries, null,
+				null, Set.of(), org.eclipse.jgit.treewalk.filter.PathFilter.create("dir"));
+		assertNotNull(selected);
+		assertEquals(1000, selected.takeDirectory(new File(trash, "dir")).size());
+	}
+
+	@Test
+	public void arbitraryFiltersRemainOnTheCallingWalk() throws Exception {
+		var filter = new org.eclipse.jgit.treewalk.filter.TreeFilter() {
+			@Override public boolean include(TreeWalk walk) {
+				throw new AssertionError("A preload worker must not evaluate a filter");
+			}
+			@Override public boolean shouldBeRecursive() { return true; }
+			@Override public org.eclipse.jgit.treewalk.filter.TreeFilter clone() { return this; }
+		};
+		assertNull(IndexPreloader.load(db, db.getFS(), index(1000, false), null,
+				null, Set.of(), filter));
 	}
 
 	@Test
