@@ -19,6 +19,8 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 import org.eclipse.jgit.dircache.DirCache;
@@ -28,10 +30,12 @@ import org.eclipse.jgit.internal.storage.file.UntrackedCache.Directory;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.util.FS_POSIX;
 import org.eclipse.jgit.util.SystemReader;
 
-/** Complete Java listings supplement native UNTR's untracked-only names. */
+/** Native UNTR names, with complete Java listings for ignored-path reporting. */
 final class UntrackedDirectoryListing {
 	private static final Map<Repository, Listings> REPOSITORIES = new WeakHashMap<>();
 
@@ -54,6 +58,20 @@ final class UntrackedDirectoryListing {
 	private final FileSnapshot indexSnapshot;
 
 	private boolean reusable;
+
+	private Repository repository;
+
+	private DirCache index;
+
+	private boolean nativeNames;
+
+	private String nativeKeyPrefix;
+
+	private boolean lastNative;
+
+	private Boolean globalExcludesValid;
+
+	private final Map<String, Boolean> directoryExcludesValid = new java.util.HashMap<>();
 
 	private record Listing(int[] stat, String[] names, int characters) {
 		int size() {
@@ -100,6 +118,11 @@ final class UntrackedDirectoryListing {
 	}
 
 	static UntrackedDirectoryListing create(Repository repo, DirCache index) {
+		return create(repo, index, true);
+	}
+
+	static UntrackedDirectoryListing create(Repository repo, DirCache index,
+			boolean reportIgnored) {
 		if (repo == null || repo.isBare()
 				|| repo.getFS().getClass() != FS_POSIX.class
 				|| SystemReader.getInstance()
@@ -126,11 +149,23 @@ final class UntrackedDirectoryListing {
 					return null;
 				}
 			}
-			return new UntrackedDirectoryListing(cache,
+			UntrackedDirectoryListing result = new UntrackedDirectoryListing(cache,
 					repo.getWorkTree().toPath().toAbsolutePath().normalize(),
 					Files.getLastModifiedTime(repo.getIndexFile().toPath())
 							.toInstant(),
 					listings, repo.getIndexFile());
+			result.repository = repo;
+			result.index = index;
+			result.nativeNames = !reportIgnored && cache.dirFlags == 0
+					&& Arrays.equals(cache.excludePerDir,
+							Constants.encode(Constants.DOT_GIT_IGNORE));
+			if (result.nativeNames) {
+				// NUL cannot occur in a filesystem path. Keep native subsets
+				// separate from complete listings and bind them to this index.
+				result.nativeKeyPrefix = "\0" + java.util.HexFormat.of() //$NON-NLS-1$
+						.formatHex(index.getReadIndexChecksum());
+			}
+			return result;
 		} catch (IOException | RuntimeException unsupported) {
 			return null;
 		}
@@ -147,6 +182,7 @@ final class UntrackedDirectoryListing {
 	}
 
 	File[] list(File directory) {
+		lastNative = false;
 		Path path = directory.toPath().toAbsolutePath().normalize();
 		String relative = root.relativize(path).toString()
 				.replace(File.separatorChar, '/');
@@ -170,6 +206,13 @@ final class UntrackedDirectoryListing {
 				}
 				return result;
 			}
+			if (nativeNames) {
+				File[] result = nativeListing(directory, relative, node, stat);
+				if (result != null) {
+					lastNative = true;
+					return result;
+				}
+			}
 		}
 		cache.dirOpened++;
 		File[] files = directory.listFiles();
@@ -187,6 +230,174 @@ final class UntrackedDirectoryListing {
 					new Listing(node.stat.fields.clone(), null, 0));
 		}
 		return files;
+	}
+
+	boolean isNativeListing() {
+		return lastNative;
+	}
+
+	private File[] nativeListing(File directory, String relative, Directory node,
+			int[] stat) {
+		if (node.checkOnly) {
+			return null;
+		}
+		try {
+			if (!validExcludes(relative)) {
+				return null;
+			}
+			String key = nativeKeyPrefix + relative;
+			Listing prior = listings.get(key);
+			if (prior != null && prior.names != null && Arrays.equals(prior.stat, stat)) {
+				return files(directory, prior.names);
+			}
+			Set<String> names = new HashSet<>();
+			for (byte[] name : node.untracked) {
+				names.add(component(name, true));
+			}
+			for (Directory child : node.directories) {
+				if (child.recurse) {
+					names.add(component(child.name, false));
+				}
+			}
+			String prefix = relative.isEmpty() ? "" : relative + "/"; //$NON-NLS-1$ //$NON-NLS-2$
+			int pos = index.findEntry(prefix);
+			if (pos < 0) {
+				pos = -pos - 1;
+			}
+			while (pos < index.getEntryCount()) {
+				String path = index.getEntry(pos).getPathString();
+				if (!path.startsWith(prefix)) {
+					break;
+				}
+				String rest = path.substring(prefix.length());
+				int slash = rest.indexOf('/');
+				String name = slash < 0 ? rest : rest.substring(0, slash);
+				names.add(name);
+				if (slash < 0) {
+					pos++;
+				} else {
+					// '0' is the byte successor of '/': skip this child's
+					// entire index prefix without decoding every descendant.
+					pos = index.findEntry(prefix + name + "0"); //$NON-NLS-1$
+					if (pos < 0) {
+						pos = -pos - 1;
+					}
+				}
+			}
+			// Even an ignored .gitignore is needed to evaluate the other entries.
+			if (!ObjectId.zeroId().equals(node.excludeOid)) {
+				names.add(Constants.DOT_GIT_IGNORE);
+			}
+			String[] array = names.toArray(String[]::new);
+			// Retain ordered input for WorkingTreeIterator's adaptive sort on
+			// subsequent walks, rather than repeating a hash-table iteration order.
+			Arrays.sort(array);
+			int characters = 0;
+			for (String name : array) {
+				characters += name.length();
+			}
+			listings.put(key, new Listing(stat, array, characters));
+			return files(directory, array);
+		} catch (IOException | RuntimeException unsafe) {
+			return null;
+		}
+	}
+
+	private static File[] files(File directory, String[] names) {
+		File[] files = new File[names.length];
+		for (int i = 0; i < files.length; i++) {
+			files[i] = new File(directory, names[i]);
+		}
+		return files;
+	}
+
+	private boolean validExcludes(String relative) throws IOException {
+		if (globalExcludesValid == null) {
+			Path excludes = repository.getConfig().getPath("core", null, //$NON-NLS-1$
+					"excludesFile", repository.getFS(), null, null); //$NON-NLS-1$
+			if (excludes == null) {
+				Path xdg = SystemReader.getInstance()
+						.getXdgConfigDirectory(repository.getFS());
+				excludes = xdg == null ? null : xdg.resolve("git/ignore"); //$NON-NLS-1$
+			}
+			globalExcludesValid = Boolean.valueOf(matchesExclude(excludes,
+					cache.excludesFile.oid) && matchesExclude(repository.getCommonDirectory()
+						.toPath().resolve(Constants.INFO_EXCLUDE), cache.infoExclude.oid));
+		}
+		if (!globalExcludesValid.booleanValue()) {
+			return false;
+		}
+		// Like native prep_exclude and WorkingTreeIterator's ignore stack,
+		// resolve each ancestor once per walk; subsequent walks validate anew.
+		Directory current = cache.root;
+		Path directory = root;
+		String path = ""; //$NON-NLS-1$
+		if (!validDirectoryExclude(path, directory, current)) {
+			return false;
+		}
+		for (String part : relative.isEmpty() ? new String[0] : relative.split("/")) { //$NON-NLS-1$
+			path = path.isEmpty() ? part : path + "/" + part; //$NON-NLS-1$
+			current = node(path);
+			directory = directory.resolve(part);
+			if (current == null || !validDirectoryExclude(path, directory, current)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private boolean validDirectoryExclude(String path, Path directory,
+			Directory node) throws IOException {
+		Boolean valid = directoryExcludesValid.get(path);
+		if (valid == null) {
+			valid = Boolean.valueOf(matchesExclude(
+					directory.resolve(Constants.DOT_GIT_IGNORE), node.excludeOid));
+			directoryExcludesValid.put(path, valid);
+		}
+		return valid.booleanValue();
+	}
+
+	private static boolean matchesExclude(Path file, ObjectId expected) throws IOException {
+		if (file == null || !Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+			return ObjectId.zeroId().equals(expected);
+		}
+		if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)
+				|| Files.size(file) > 1024 * 1024) {
+			throw new IOException("Unsupported exclusion file"); //$NON-NLS-1$
+		}
+		try (ObjectInserter.Formatter formatter = new ObjectInserter.Formatter()) {
+			byte[] bytes;
+			try (var input = Files.newInputStream(file)) {
+				bytes = input.readNBytes(1024 * 1024 + 1);
+			}
+			if (bytes.length > 1024 * 1024) {
+				throw new IOException("Exclusion file exceeds cache limit"); //$NON-NLS-1$
+			}
+			if (formatter.idFor(Constants.OBJ_BLOB, bytes).equals(expected)) {
+				return true;
+			}
+			// Native add_patterns appends LF before hashing an untracked
+			// exclusion file. It can instead reuse a tracked file's index OID.
+			// The extra empty final line does not change ignore semantics.
+			byte[] terminated = Arrays.copyOf(bytes, bytes.length + 1);
+			terminated[bytes.length] = '\n';
+			return bytes.length != 0 && formatter.idFor(Constants.OBJ_BLOB,
+					terminated).equals(expected);
+		}
+	}
+
+	private static String component(byte[] raw, boolean slash) throws IOException {
+		String name = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+				.onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+				.decode(java.nio.ByteBuffer.wrap(raw)).toString();
+		if (slash && name.endsWith("/")) { //$NON-NLS-1$
+			name = name.substring(0, name.length() - 1);
+		}
+		if (name.isEmpty() || name.equals(".") || name.equals("..") //$NON-NLS-1$ //$NON-NLS-2$
+				|| name.indexOf('/') >= 0 || name.indexOf('\0') >= 0) {
+			throw new IOException("Unsafe cached name"); //$NON-NLS-1$
+		}
+		return name;
 	}
 
 	void finish() {

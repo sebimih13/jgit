@@ -230,6 +230,19 @@ public class IndexDiff {
 
 	private TreeFilter filter = null;
 
+	private boolean reportIgnored = true;
+
+	/**
+	 * Select ignored-path reporting, which is enabled by default. Ignore matching is
+	 * retained when reporting is disabled. Whole-tree scans may then consume
+	 * native UNTR records without enumerating ignored names.
+	 * @param report whether to include ignored paths in the result
+	 * @since 7.8
+	 */
+	public void setReportIgnored(boolean report) {
+		reportIgnored = report;
+	}
+
 	private final WorkingTreeIterator initialWorkingTreeIterator;
 
 	private Set<String> added = new HashSet<>();
@@ -569,7 +582,8 @@ public class IndexDiff {
 			initialWorkingTreeIterator.setFsMonitorValidEntries(trusted);
 		}
 		if (initialWorkingTreeIterator instanceof FileTreeIterator) {
-			((FileTreeIterator) initialWorkingTreeIterator).setUntrackedCache(dirCache);
+			((FileTreeIterator) initialWorkingTreeIterator).setUntrackedCache(dirCache,
+					reportIgnored || filter != null);
 		}
 		if (filter == null
 				&& initialWorkingTreeIterator instanceof FileTreeIterator) {
@@ -787,7 +801,7 @@ public class IndexDiff {
 		if (filter == null && initialWorkingTreeIterator instanceof FileTreeIterator) {
 			((FileTreeIterator) initialWorkingTreeIterator).finishUntrackedCache();
 		}
-		ignored = indexDiffFilter.getIgnoredPaths();
+		ignored = reportIgnored ? indexDiffFilter.getIgnoredPaths() : java.util.Set.of();
 		if (added.isEmpty() && changed.isEmpty() && removed.isEmpty()
 				&& missing.isEmpty() && modified.isEmpty()
 				&& untracked.isEmpty()) {

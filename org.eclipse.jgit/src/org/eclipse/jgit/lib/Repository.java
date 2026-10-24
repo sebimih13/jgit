@@ -1288,7 +1288,7 @@ public abstract class Repository implements AutoCloseable {
 		// we want DirCache to inform us so that we can inform registered
 		// listeners about index changes
 		IndexChangedListener l = (IndexChangedEvent event) -> {
-			notifyIndexChanged(true);
+			notifyIndexChanged(event);
 		};
 		return DirCache.lock(this, l);
 	}
@@ -1636,6 +1636,18 @@ public abstract class Repository implements AutoCloseable {
 	 * @since 5.0
 	 */
 	public abstract void notifyIndexChanged(boolean internal);
+
+	/**
+	 * Notify an index change while retaining its consumed monitor scope.
+	 * Implementations that cannot preserve the payload fall back to the
+	 * existing notification with unknown scope.
+	 *
+	 * @param event index event to dispatch
+	 * @since 7.8
+	 */
+	public void notifyIndexChanged(IndexChangedEvent event) {
+		notifyIndexChanged(event.isInternal());
+	}
 
 	/**
 	 * Get a shortened more user friendly ref name

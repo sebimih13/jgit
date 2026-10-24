@@ -38,12 +38,166 @@ import org.eclipse.jgit.util.FS_POSIX;
 import org.junit.Test;
 
 public class UntrackedDirectoryListingTest extends RepositoryTestCase {
+	@Test
+	public void nativeAllRecordsServeColdWalkWithoutIgnoredResults()
+			throws Exception {
+		prepare("all");
+		try (var fresh = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+				.setGitDir(db.getDirectory()).build()) {
+			DirCache index = fresh.readDirCache();
+			byte[] original = Files.readAllBytes(fresh.getIndexFile().toPath());
+			var listing = UntrackedDirectoryListing.create(fresh, index, false);
+			assertNotNull(listing);
+			assertEquals(Set.of("tracked", "loose", ".gitignore"),
+					names(listing.list(sub())));
+			assertEquals("No prior Java enumeration is required", 0,
+					index.getUntrackedCache().dirOpened);
+			// An incomplete native-only list must never seed the complete-name
+			// supplement used by the existing ignored-reporting API.
+			listing = UntrackedDirectoryListing.create(fresh, index, true);
+			assertTrue(names(listing.list(sub())).contains("hidden.tmp"));
+			assertEquals(1, index.getUntrackedCache().dirOpened);
+			try (Git git = Git.wrap(fresh)) {
+				Status compact = git.status().setReportIgnored(false).call();
+				Status complete = git.status().call();
+				assertEquals(complete.getUntracked(), compact.getUntracked());
+				assertTrue(compact.getIgnoredNotInIndex().isEmpty());
+				assertEquals(Set.of("sub/hidden.tmp"), complete.getIgnoredNotInIndex());
+			}
+			assertArrayEquals(original, Files.readAllBytes(fresh.getIndexFile().toPath()));
+		}
+	}
+
+	@Test
+	public void ignoreContentChangesRejectColdNativeNames() throws Exception {
+		prepare("all");
+		writeTrashFile("sub/.gitignore", "\n");
+		try (var fresh = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+				.setGitDir(db.getDirectory()).build()) {
+			DirCache index = fresh.readDirCache();
+			var listing = UntrackedDirectoryListing.create(fresh, index, false);
+			assertTrue(names(listing.list(sub())).contains("hidden.tmp"));
+			assertEquals("Ignore edits must reject native omissions", 1,
+					index.getUntrackedCache().dirOpened);
+			try (Git git = Git.wrap(fresh)) {
+				assertTrue(git.status().setReportIgnored(false).call()
+						.getUntracked().contains("sub/hidden.tmp"));
+			}
+		}
+		assertNativeStatus();
+	}
+
+	@Test
+	public void nativeCandidatesDoNotHideMissingTrackedFiles() throws Exception {
+		prepare("all");
+		Files.delete(sub().toPath().resolve("tracked"));
+		Files.setLastModifiedTime(sub().toPath(),
+				FileTime.fromMillis(System.currentTimeMillis() - 60000));
+		org.eclipse.jgit.junit.NativeFsMonitorWorkloadSupport.warmNativeUntrackedCache(db);
+		try (var fresh = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+				.setGitDir(db.getDirectory()).build(); Git git = Git.wrap(fresh)) {
+			Status compact = git.status().setReportIgnored(false).call();
+			Status complete = git.status().call();
+			assertEquals(Set.of("sub/tracked"), compact.getMissing());
+			assertEquals(complete.getMissing(), compact.getMissing());
+			assertEquals(complete.getUntracked(), compact.getUntracked());
+			assertEquals(complete.getModified(), compact.getModified());
+		}
+	}
+
+	@Test
+	public void changedGlobalAndAncestorIgnoresRequireEnumeration() throws Exception {
+		for (String context : new String[] { "global", "info", "ancestor" }) {
+			prepare("all");
+			Path changed = switch (context) {
+			case "global" -> Path.of(db.getConfig().getString("core", null, "excludesFile"));
+			case "info" -> db.getDirectory().toPath().resolve("info/exclude");
+			default -> db.getWorkTree().toPath().resolve(".gitignore");
+			};
+			Files.createDirectories(changed.getParent());
+			Files.writeString(changed, "new-pattern\n");
+			try (var fresh = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+					.setGitDir(db.getDirectory()).build()) {
+				DirCache index = fresh.readDirCache();
+				var listing = UntrackedDirectoryListing.create(fresh, index, false);
+				assertTrue(names(listing.list(sub())).contains("hidden.tmp"));
+				assertEquals(context, 1, index.getUntrackedCache().dirOpened);
+			}
+			Files.delete(changed);
+		}
+	}
+
+	@Test
+	public void normalModeRecordsCannotSupplyAllModeNames() throws Exception {
+		prepare("normal");
+		try (var fresh = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+				.setGitDir(db.getDirectory()).build()) {
+			DirCache index = fresh.readDirCache();
+			var listing = UntrackedDirectoryListing.create(fresh, index, false);
+			assertTrue(names(listing.list(sub())).contains("hidden.tmp"));
+			assertEquals(1, index.getUntrackedCache().dirOpened);
+		}
+	}
+
+	@Test
+	public void refreshedNativeIgnoresCannotReuseAnOlderSubset() throws Exception {
+		prepare("all");
+		try (var fresh = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+				.setGitDir(db.getDirectory()).build()) {
+			DirCache before = fresh.readDirCache();
+			var listing = UntrackedDirectoryListing.create(fresh, before, false);
+			assertTrue(!names(listing.list(sub())).contains("hidden.tmp"));
+			assertEquals(0, before.getUntrackedCache().dirOpened);
+			Files.writeString(sub().toPath().resolve(".gitignore"), "\n");
+			org.eclipse.jgit.junit.NativeFsMonitorWorkloadSupport.warmNativeUntrackedCache(db);
+			DirCache after = fresh.readDirCache();
+			assertTrue(!Arrays.equals(before.getReadIndexChecksum(), after.getReadIndexChecksum()));
+			assertArrayEquals(before.getUntrackedCache().root.directories.stream()
+					.filter(d -> Arrays.equals(d.name, Constants.encode("sub")))
+					.findFirst().orElseThrow().stat.fields,
+					after.getUntrackedCache().root.directories.stream()
+							.filter(d -> Arrays.equals(d.name, Constants.encode("sub")))
+							.findFirst().orElseThrow().stat.fields);
+			listing = UntrackedDirectoryListing.create(fresh, after, false);
+			assertTrue(names(listing.list(sub())).contains("hidden.tmp"));
+			assertEquals("The new native payload can be consumed without listing", 0,
+					after.getUntrackedCache().dirOpened);
+		}
+	}
+
+	@Test
+	public void indexedPrefixesAndTrackedIgnoresRemainComplete() throws Exception {
+		prepare("all");
+		for (String path : new String[] { "sub/dir/file", "sub/dir.other", "sub/dir0" }) {
+			writeTrashFile(path, "base\n");
+		}
+		try (Git git = Git.wrap(db)) {
+			git.add().addFilepattern("sub/.gitignore").addFilepattern("sub/dir")
+					.addFilepattern("sub/dir.other").addFilepattern("sub/dir0").call();
+		}
+		for (Path dir : new Path[] { sub().toPath(), sub().toPath().resolve("dir") }) {
+			Files.setLastModifiedTime(dir, FileTime.fromMillis(System.currentTimeMillis() - 60000));
+		}
+		org.eclipse.jgit.junit.NativeFsMonitorWorkloadSupport.warmNativeUntrackedCache(db);
+		try (var fresh = new org.eclipse.jgit.storage.file.FileRepositoryBuilder()
+				.setGitDir(db.getDirectory()).build()) {
+			DirCache index = fresh.readDirCache();
+			var listing = UntrackedDirectoryListing.create(fresh, index, false);
+			assertEquals(Set.of("tracked", "loose", ".gitignore", "dir", "dir.other", "dir0"),
+					names(listing.list(sub())));
+			assertEquals(0, index.getUntrackedCache().dirOpened);
+		}
+	}
 	private DirCache prepare(String mode) throws Exception {
 		assumeTrue(db.getFS().getClass() == FS_POSIX.class);
 		assumeTrue(db.getWorkTree().toPath().getFileSystem()
 				.supportedFileAttributeViews().contains("unix"));
 		writeTrashFile("sub/.gitignore", "*.tmp\n");
 		writeTrashFile("sub/hidden.tmp", "ignored\n");
+		Path excludes = db.getDirectory().toPath().resolve("native-test-excludes");
+		Files.writeString(excludes, "");
+		db.getConfig().setString("core", null, "excludesFile", excludes.toString());
+		db.getConfig().save();
 		NativeUntrackedCheckoutSupport.prepare(db, mode, "sub/tracked");
 		return db.readDirCache();
 	}

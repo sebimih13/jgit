@@ -2802,7 +2802,12 @@ public abstract class FS {
 			return file;
 		}
 
-		boolean exists() {
+		/**
+		 * Whether the path existed when these attributes were obtained.
+		 * @return whether the path existed, including symbolic links
+		 * @since 7.8
+		 */
+		public boolean exists() {
 			return exists;
 		}
 	}

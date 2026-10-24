@@ -535,10 +535,15 @@ public class FileRepository extends Repository {
 
 	@Override
 	public void notifyIndexChanged(boolean internal) {
+		notifyIndexChanged(new IndexChangedEvent(internal));
+	}
+
+	@Override
+	public void notifyIndexChanged(IndexChangedEvent event) {
 		synchronized (snapshotLock) {
 			snapshot = FileSnapshot.save(getIndexFile());
 		}
-		fireEvent(new IndexChangedEvent(internal));
+		fireEvent(event);
 	}
 
 	@Override

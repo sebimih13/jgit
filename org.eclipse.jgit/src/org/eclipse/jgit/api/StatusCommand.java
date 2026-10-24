@@ -47,6 +47,9 @@ public class StatusCommand extends GitCommand<Status> {
 		final FsMonitor.State monitor = new FsMonitor.State();
 
 		WeakReference<Status> result = new WeakReference<>(null);
+
+		// Reporting modes must retain independent results and provider clocks.
+		CachedStatus withoutIgnored;
 	}
 
 	private WorkingTreeIterator workingTreeIt;
@@ -56,6 +59,21 @@ public class StatusCommand extends GitCommand<Status> {
 	private ProgressMonitor progressMonitor = null;
 
 	private IgnoreSubmoduleMode ignoreSubmoduleMode = null;
+
+	private boolean reportIgnored = true;
+
+	/**
+	 * Select whether ignored paths are included in this status result. Omitting them
+	 * permits native untracked-directory cache reuse; ignore rules still apply
+	 * to untracked paths. The default preserves ignored-path reporting.
+	 * @param report whether to report ignored paths
+	 * @return this command
+	 * @since 7.8
+	 */
+	public StatusCommand setReportIgnored(boolean report) {
+		reportIgnored = report;
+		return this;
+	}
 
 	/**
 	 * Constructor for StatusCommand.
@@ -150,6 +168,12 @@ public class StatusCommand extends GitCommand<Status> {
 			synchronized (MONITORED) {
 				cache = MONITORED.computeIfAbsent(repo,
 						r -> new CachedStatus());
+				if (!reportIgnored) {
+					if (cache.withoutIgnored == null) {
+						cache.withoutIgnored = new CachedStatus();
+					}
+					cache = cache.withoutIgnored;
+				}
 			}
 			synchronized (cache) {
 				FsMonitor.Probe probe = cache.monitor.query(repo);
@@ -202,6 +226,7 @@ public class StatusCommand extends GitCommand<Status> {
 
 		try {
 			IndexDiff diff = new IndexDiff(repo, Constants.HEAD, workingTreeIt);
+			diff.setReportIgnored(reportIgnored);
 			if (untrackedOnly) {
 				diff.setFilter(new org.eclipse.jgit.treewalk.filter.TreeFilter() {
 					@Override

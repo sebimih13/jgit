@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 
 import org.eclipse.jgit.api.errors.AbortedByHookException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
@@ -276,7 +277,9 @@ public class DirCache {
 		c.repository = repository;
 		try {
 			if (!c.fsMonitorCacheExplicit) {
-				c.fsMonitorCache = FsMonitor.refreshIndex(repository, c);
+				var refresh = FsMonitor.refreshIndexWithChanges(repository, c);
+				c.fsMonitorCache = refresh.cache();
+				c.fsMonitorPaths = refresh.paths();
 				if (c.fsMonitorCache == null) {
 					c.clearFsMonitorBits();
 				} else {
@@ -340,6 +343,8 @@ public class DirCache {
 	private FsMonitorCache fsMonitorCache;
 
 	private boolean fsMonitorCacheExplicit;
+
+	private Set<String> fsMonitorPaths;
 
 	private boolean untrackedCacheExplicit;
 
@@ -628,6 +633,7 @@ public class DirCache {
 	public void clear() {
 		untrackedCache = null;
 		fsMonitorCache = null;
+		fsMonitorPaths = null;
 		fsMonitorCacheExplicit = false;
 		untrackedCacheExplicit = false;
 		untrackedCacheIndexState = null;
@@ -1052,10 +1058,16 @@ public class DirCache {
 						PostIndexChangeHook.NAME), e);
 			}
 		}
+		boolean monitorChanged = repository != null
+				&& FsMonitor.isHookConfigured(repository)
+				&& (fsMonitorPaths == null || !fsMonitorPaths.isEmpty());
 		if (indexChangedListener != null
-				&& !Arrays.equals(readIndexChecksum, writeIndexChecksum)) {
-			indexChangedListener.onIndexChanged(new IndexChangedEvent(true));
+				&& (monitorChanged
+						|| !Arrays.equals(readIndexChecksum, writeIndexChecksum))) {
+			indexChangedListener.onIndexChanged(
+					new IndexChangedEvent(true, fsMonitorPaths, writeIndexChecksum));
 		}
+		fsMonitorPaths = null;
 		return true;
 	}
 

@@ -262,8 +262,18 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 * @since 7.8
 	 */
 	public void setUntrackedCache(DirCache index) {
+		setUntrackedCache(index, true);
+	}
+
+	/**
+	 * Configure complete-name or native untracked-name reuse for this walk.
+	 * @param index validated index
+	 * @param reportIgnored whether complete ignored-path reporting is required
+	 * @since 7.8
+	 */
+	public void setUntrackedCache(DirCache index, boolean reportIgnored) {
 		untrackedListing = getClass() == FileTreeIterator.class
-				? UntrackedDirectoryListing.create(getRepository(), index) : null;
+				? UntrackedDirectoryListing.create(getRepository(), index, reportIgnored) : null;
 	}
 
 	/**
@@ -294,16 +304,28 @@ public class FileTreeIterator extends WorkingTreeIterator {
 		FS.Attributes[] parallel = fs.getClass() == FS_POSIX.class
 				? DirectoryMetadata.read(fs, files, attributes) : null;
 		Entry[] result = new Entry[files.length];
+		int count = 0;
+		boolean nativeListing = untrackedListing != null && untrackedListing.isNativeListing();
 		for (int i = 0; i < files.length; i++) {
 			File file = files[i];
 			FS.Attributes cached = parallel != null ? parallel[i]
 					: attributes == null ? null
 							: attributes.get(fs.normalize(file).getName());
-			result[i] = cached == null
+			if (nativeListing) {
+				if (cached == null) {
+					cached = fs.getAttributes(fs.normalize(file));
+				}
+				// The native cache describes untracked names; index-derived
+				// candidates can already have been missing at capture time.
+				if (!cached.exists()) {
+					continue;
+				}
+			}
+			result[count++] = cached == null
 					? new FileEntry(file, fs, fileModeStrategy)
 					: new FileEntry(file, fs, cached, fileModeStrategy);
 		}
-		return result;
+		return count == result.length ? result : java.util.Arrays.copyOf(result, count);
 	}
 
 	/**

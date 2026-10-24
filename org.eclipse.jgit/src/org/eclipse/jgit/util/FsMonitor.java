@@ -185,17 +185,49 @@ public final class FsMonitor {
 	 */
 	public static FsMonitorCache refreshIndex(Repository repository,
 			DirCache index) throws IOException {
+		return refreshIndexWithChanges(repository, index).cache();
+	}
+
+	/**
+	 * State and worktree scope consumed before an index mutation.
+	 * @param cache refreshed native model, possibly null
+	 * @param paths immutable worktree paths, or null when a full scan is required
+	 * @since 7.8
+	 */
+	public record IndexRefresh(FsMonitorCache cache, Set<String> paths) {
+		/**
+		 * Create a refresh result with an immutable notification scope.
+		 * @param cache refreshed native model
+		 * @param paths paths, or null for unknown scope
+		 */
+		public IndexRefresh {
+			paths = paths == null ? null : Set.copyOf(paths);
+		}
+	}
+
+	/**
+	 * Refresh the index and retain the notifications consumed by its writer.
+	 * The scope must accompany any resulting index event, since the serialized
+	 * bitmap cannot represent paths outside the index.
+	 * @param repository repository whose index is locked
+	 * @param index freshly read index
+	 * @return refreshed model and notification scope
+	 * @throws IOException on invalid untracked-cache mutation
+	 * @since 7.8
+	 */
+	public static IndexRefresh refreshIndexWithChanges(Repository repository,
+			DirCache index) throws IOException {
 		FsMonitorCache previous = index.getFsMonitorCache();
 		if (previous == null) {
-			return initializeIndex(repository, index);
+			return new IndexRefresh(initializeIndex(repository, index), null);
 		}
 		String hook = configuredHook(repository);
 		if (hook == null || hook.isEmpty() || Boolean.FALSE.equals(
 				UntrackedCacheConfig.parseBoolean(hook))) {
-			return null;
+			return new IndexRefresh(null, null);
 		}
 		if (isBooleanSetting(hook)) {
-			return previous; // Daemon IPC is not implemented here.
+			return new IndexRefresh(previous, null); // No daemon IPC.
 		}
 		State state;
 		try {
@@ -203,7 +235,7 @@ public final class FsMonitor {
 		} catch (CharacterCodingException binaryToken) {
 			// Preserve opaque storage that cannot be passed through Java's
 			// String argv API. Direct status queries require a full check.
-			return previous;
+			return new IndexRefresh(previous, null);
 		}
 		Instant now = Instant.now();
 		String boundary = Long.toUnsignedString(now.getEpochSecond()
@@ -214,7 +246,12 @@ public final class FsMonitor {
 		String token = probe != null ? probe.token
 				: requested == 2 ? "" : boundary; //$NON-NLS-1$
 		BitSet dirty = new BitSet();
+		Set<String> paths = new HashSet<>();
+		boolean full = probe == null || probe.invalidationScopeUnknown
+				|| repository.getConfig().getBoolean("core", null, //$NON-NLS-1$
+						"ignoreCase", false); //$NON-NLS-1$
 		if (probe == null || probe.changedPaths.contains("/")) { //$NON-NLS-1$
+			full = true;
 			dirty.set(0, index.getEntryCount());
 		} else {
 			for (int i = 0; i < index.getEntryCount(); i++) {
@@ -228,7 +265,15 @@ public final class FsMonitor {
 				try {
 					SystemReader.getInstance().checkPath(trimmed);
 				} catch (org.eclipse.jgit.errors.CorruptObjectException unsafe) {
+					full = true;
 					continue;
+				}
+				paths.add(trimmed);
+				if (trimmed.equals(".gitignore") //$NON-NLS-1$
+						|| trimmed.endsWith("/.gitignore") //$NON-NLS-1$
+						|| trimmed.equals(".gitattributes") //$NON-NLS-1$
+						|| trimmed.endsWith("/.gitattributes")) { //$NON-NLS-1$
+					full = true;
 				}
 				int matched = invalidateNotification(index, dirty, path);
 				if (matched == 0 && repository.getConfig().getBoolean("core", //$NON-NLS-1$
@@ -237,7 +282,8 @@ public final class FsMonitor {
 				}
 			}
 		}
-		return new FsMonitorCache(Constants.encode(token), dirty);
+		return new IndexRefresh(new FsMonitorCache(Constants.encode(token), dirty),
+				full ? null : paths);
 	}
 
 	private static State storedState(Repository repository, FsMonitorCache stored)
@@ -347,6 +393,8 @@ public final class FsMonitor {
 		private final boolean unchanged;
 
 		private final List<String> changedPaths;
+
+		private boolean invalidationScopeUnknown;
 
 		private byte[] indexChecksum;
 
@@ -610,6 +658,7 @@ public final class FsMonitor {
 					}
 					boolean noChanges = true;
 					List<String> changedPaths = new ArrayList<>();
+					boolean scopeUnknown = false;
 					for (int i = 1; i < records.length; i++) {
 						// Native Git does not have worktree entries inside its
 						// .git directory.
@@ -619,6 +668,8 @@ public final class FsMonitor {
 								&& !records[i].startsWith(".git/")) {
 							noChanges = false;
 							changedPaths.add(records[i]);
+						} else if (!records[i].equals(".git/index")) { //$NON-NLS-1$
+							scopeUnknown = true;
 						}
 					}
 					// External index/ref/config changes during the hook
@@ -651,8 +702,10 @@ public final class FsMonitor {
 					}
 					trace.data("cache/hit", //$NON-NLS-1$
 							Boolean.toString(noChanges && sameContext));
-					return new Probe(key, records[0], noChanges && sameContext,
+					Probe result = new Probe(key, records[0], noChanges && sameContext,
 							changedPaths, hasUntrackedCache, queryVersion);
+					result.invalidationScopeUnknown = scopeUnknown;
+					return result;
 				} catch (Exception failure) {
 					if (failure instanceof InterruptedException) {
 						Thread.currentThread().interrupt();
