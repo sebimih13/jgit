@@ -97,6 +97,7 @@ public class IndexPreloaderTest extends RepositoryTestCase {
 
 	@Test
 	public void pathGroupsPreloadOnlySelectedFiles() throws Exception {
+		mockSystemReader.setProperty("GIT_TEST_PRELOAD_INDEX", "true");
 		DirCache entries = index(1000, true);
 		for (Set<String> names : List.of(Set.of("f0001"), Set.of("f0000", "f0999"))) {
 			AtomicInteger stats = new AtomicInteger();
@@ -118,6 +119,19 @@ public class IndexPreloaderTest extends RepositoryTestCase {
 			assertEquals(names.size(), stats.get());
 			assertEquals(names, result.takeDirectory(new File(trash, "dir")).keySet());
 		}
+		mockSystemReader.setProperty("GIT_TEST_PRELOAD_INDEX", null);
+	}
+
+	@Test
+	public void smallFilteredWorkDoesNotStartWholeIndexWorkers() throws Exception {
+		FS_POSIX failure = new FS_POSIX() {
+			@Override
+			public Attributes getAttributes(File file) {
+				throw new AssertionError("A one-file filter must not start a whole-index preload");
+			}
+		};
+		assertNull(IndexPreloader.load(db, failure, index(1000, false), null,
+				null, Set.of(), org.eclipse.jgit.treewalk.filter.PathFilter.create("dir/f0001")));
 	}
 
 	@Test
@@ -235,6 +249,28 @@ public class IndexPreloaderTest extends RepositoryTestCase {
 		assertEquals(42, entries.get("f0001").getLength());
 		assertEquals(42, entries.get("f0998").getLength());
 		assertNull(result.takeDirectory(new File(trash, "dir")));
+	}
+
+	@Test
+	public void monitoredMetadataFollowsEnumeratedNamesAndDirectoryBoundaries()
+			throws Exception {
+		DirCache index = index(3, true);
+		Set<DirCacheEntry> trusted = new HashSet<>();
+		for (int i = 0; i < index.getEntryCount(); i++) {
+			index.getEntry(i).setLength(42);
+			trusted.add(index.getEntry(i));
+		}
+		IndexPreloader monitored = IndexPreloader.fromMonitor(db, db.getFS(), trusted);
+		// The proof belongs to the captured index, not later entry mutations.
+		index.getEntry(0).setLength(7);
+		File directory = new File(trash, "dir");
+		assertNull(monitored.takeDirectory(new File(trash, "dir-other"),
+				new File[] { new File(trash, "dir-other/f0000") }));
+		Map<String, FS.Attributes> metadata = monitored.takeDirectory(directory,
+				new File[] { new File(directory, "f0000"), new File(directory, "untracked") });
+		assertEquals(Set.of("f0000"), metadata.keySet());
+		assertEquals(42, metadata.get("f0000").getLength());
+		assertNull(monitored.takeDirectory(directory));
 	}
 
 	@Test

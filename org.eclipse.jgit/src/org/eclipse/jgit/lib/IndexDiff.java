@@ -21,6 +21,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.text.MessageFormat;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -37,6 +38,7 @@ import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.errors.MissingObjectException;
 import org.eclipse.jgit.errors.StopWalkException;
 import org.eclipse.jgit.internal.JGitText;
+import org.eclipse.jgit.internal.util.IndexEntrySelection;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.submodule.SubmoduleWalk;
 import org.eclipse.jgit.submodule.SubmoduleWalk.IgnoreSubmoduleMode;
@@ -248,7 +250,7 @@ public class IndexDiff {
 			return false;
 		}
 		Set<String> verified = new HashSet<>();
-		if (FsMonitor.isHookConfigured(repository)) {
+		if (FsMonitor.isConfigured(repository)) {
 			for (int i = 0; i < dirCache.getEntryCount(); i++) {
 				DirCacheEntry entry = dirCache.getEntry(i);
 				String path = entry.getPathString();
@@ -537,7 +539,7 @@ public class IndexDiff {
 		forceContentCheckPaths = java.util.List.copyOf(paths);
 	}
 
-	private Set<DirCacheEntry> configureContentChecks() {
+	private Set<DirCacheEntry> configureContentChecks(BitSet selected) {
 		if (forceContentCheckPaths.isEmpty()) {
 			initialWorkingTreeIterator.setForceContentCheckEntries(Collections.emptySet());
 			return Collections.emptySet();
@@ -553,7 +555,9 @@ public class IndexDiff {
 			}
 		}
 		if (all) {
-			for (int i = 0; i < dirCache.getEntryCount(); i++) {
+			for (int i = selected == null ? 0 : selected.nextSetBit(0);
+					i >= 0 && i < dirCache.getEntryCount();
+					i = selected == null ? i + 1 : selected.nextSetBit(i + 1)) {
 				addContentCheckEntry(entries, dirCache.getEntry(i));
 			}
 			initialWorkingTreeIterator.setForceContentCheckEntries(entries);
@@ -562,7 +566,7 @@ public class IndexDiff {
 		for (String path : forceContentCheckPaths) {
 			String directory = path.endsWith("/") ? path : path + "/"; //$NON-NLS-1$ //$NON-NLS-2$
 			int file = dirCache.findEntry(path);
-			if (file >= 0) {
+			if (file >= 0 && (selected == null || selected.get(file))) {
 				addContentCheckEntry(entries, dirCache.getEntry(file));
 			}
 			int start = dirCache.findEntry(directory);
@@ -574,7 +578,9 @@ public class IndexDiff {
 				if (!entry.getPathString().startsWith(directory)) {
 					break;
 				}
-				addContentCheckEntry(entries, entry);
+				if (selected == null || selected.get(i)) {
+					addContentCheckEntry(entries, entry);
+				}
 			}
 		}
 		initialWorkingTreeIterator.setForceContentCheckEntries(entries);
@@ -610,9 +616,10 @@ public class IndexDiff {
 				checks.addAll(probe.getIndexCheckPaths(dirCache));
 				forceContentCheckPaths = checks;
 			}
-			Set<DirCacheEntry> forced = configureContentChecks();
+			BitSet selected = IndexEntrySelection.select(dirCache, filter, monitor);
+			Set<DirCacheEntry> forced = configureContentChecks(selected);
 			Set<DirCacheEntry> trusted = probe != null
-					? probe.getIndexValidEntries(dirCache) : new HashSet<>();
+					? probe.getIndexValidEntries(dirCache, selected) : new HashSet<>();
 			trusted.removeAll(forced);
 			initialWorkingTreeIterator.setFsMonitorValidEntries(trusted);
 		}

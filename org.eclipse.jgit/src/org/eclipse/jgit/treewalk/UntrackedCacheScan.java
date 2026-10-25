@@ -10,6 +10,7 @@ package org.eclipse.jgit.treewalk;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -75,6 +76,8 @@ final class UntrackedCacheScan {
 				|| repository.getFS().getClass() != FS_POSIX.class
 				|| FsMonitor.isConfigured(repository)
 						&& !FsMonitor.isHookConfigured(repository)
+						&& !Files.exists(repository.getDirectory().toPath()
+								.resolve("fsmonitor--daemon.ipc")) //$NON-NLS-1$
 				|| repository.getConfig().get(UntrackedCacheConfig.KEY)
 						.getMode() == UntrackedCacheConfig.Mode.REMOVE
 				|| !"all" //$NON-NLS-1$
@@ -259,7 +262,7 @@ final class UntrackedCacheScan {
 			if (cache == null)
 				return false;
 			byte[] payload = cache.write();
-			if (!FsMonitor.isHookConfigured(repository)
+			if (!FsMonitor.isConfigured(repository)
 					&& scanned.getUntrackedCache() != null && Arrays.equals(
 							payload, scanned.getUntrackedCache().write()))
 				return false;

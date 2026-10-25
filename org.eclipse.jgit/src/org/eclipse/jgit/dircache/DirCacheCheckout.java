@@ -313,7 +313,7 @@ public class DirCacheCheckout {
 	 */
 	public void preScanTwoTrees() throws CorruptObjectException, IOException {
 		if (workingTree instanceof FileTreeIterator) {
-			((FileTreeIterator) workingTree).preloadIndex(dc, monitor);
+			((FileTreeIterator) workingTree).prepareCheckout(dc, monitor);
 		}
 		removed.clear();
 		updated.clear();
@@ -354,7 +354,7 @@ public class DirCacheCheckout {
 	public void prescanOneTree() throws MissingObjectException,
 			IncorrectObjectTypeException, CorruptObjectException, IOException {
 		if (workingTree instanceof FileTreeIterator) {
-			((FileTreeIterator) workingTree).preloadIndex(dc, monitor);
+			((FileTreeIterator) workingTree).prepareCheckout(dc, monitor);
 		}
 		removed.clear();
 		updated.clear();
@@ -429,7 +429,7 @@ public class DirCacheCheckout {
 				update(m);
 			} else if (i.getDirCacheEntry() != null) {
 				// The index contains a file (and not a folder)
-				if (f.isModified(i.getDirCacheEntry(), true,
+				if (f.isModifiedForCheckout(i.getDirCacheEntry(),
 						this.walk.getObjectReader())
 						|| i.getDirCacheEntry().getStage() != 0) {
 					// The working tree file is dirty or the index contains a
@@ -873,7 +873,7 @@ public class DirCacheCheckout {
 			case 0xFFD: // 12 13 14
 				if (equalIdAndMode(hId, hMode, iId, iMode))
 					if (f != null
-							&& f.isModified(dce, true,
+							&& f.isModifiedForCheckout(dce,
 									this.walk.getObjectReader()))
 						conflict(name, dce, h, m); // 13
 					else
@@ -1010,7 +1010,7 @@ public class DirCacheCheckout {
 						// Nothing in Head
 						// Something in Index
 						if (dce != null
-								&& (f == null || f.isModified(dce, true,
+								&& (f == null || f.isModifiedForCheckout(dce,
 										this.walk.getObjectReader())))
 							// No file or file is dirty
 							// Nothing in Merge and current path is part of
@@ -1080,7 +1080,7 @@ public class DirCacheCheckout {
 						// Nothing in Merge
 						// Something in Head
 						if (f != null
-								&& f.isModified(dce, true,
+								&& f.isModifiedForCheckout(dce,
 										this.walk.getObjectReader())) {
 							// file is dirty
 							// Index contains the same as Head
@@ -1157,7 +1157,7 @@ public class DirCacheCheckout {
 						// file content
 						update(1, name, mId, mMode);
 					} else if (dce != null
-							&& (f != null && f.isModified(dce, true,
+							&& (f != null && f.isModifiedForCheckout(dce,
 									this.walk.getObjectReader()))) {
 						// File exists and is dirty
 						// Head and Index don't contain a submodule
@@ -1250,7 +1250,7 @@ public class DirCacheCheckout {
 			existing.add(path);
 		}
 		if (force) {
-			if (f == null || f.isModified(e, true, walk.getObjectReader())) {
+			if (f == null || f.isModifiedForCheckout(e, walk.getObjectReader())) {
 				kept.add(path);
 				checkout.checkout(e,
 						new CheckoutMetadata(walk.getEolStreamType(CHECKOUT_OP),
@@ -1366,7 +1366,7 @@ public class DirCacheCheckout {
 				wtIt = tw.getTree(1, WorkingTreeIterator.class);
 				if (dcIt == null || wtIt == null)
 					return true;
-				if (wtIt.isModified(dcIt.getDirCacheEntry(), true,
+				if (wtIt.isModifiedForCheckout(dcIt.getDirCacheEntry(),
 						this.walk.getObjectReader())) {
 					return true;
 				}

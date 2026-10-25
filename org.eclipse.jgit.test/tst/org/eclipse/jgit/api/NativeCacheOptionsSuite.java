@@ -25,7 +25,10 @@ import org.junit.runners.Suite;
 
 /** Validation of the implemented native cache paths; not universal Git parity. */
 @RunWith(Suite.class)
-@Suite.SuiteClasses({ NativeCacheStatusTest.class, FsMonitorTest.class,
+@Suite.SuiteClasses({ NativeCacheStatusTest.class, FsMonitorCheckoutTest.class, FsMonitorTest.class,
+		org.eclipse.jgit.util.FsMonitorDaemonClientTest.class,
+		org.eclipse.jgit.util.FsMonitorDaemonTest.class,
+		org.eclipse.jgit.util.FsMonitorFilteredStatusTest.class,
 		FsMonitorIndexQueryTest.class, FsMonitorInitializationTest.class,
 		FsMonitorCacheTest.class, FsMonitorWriterRefreshTest.class,
 		UntrackedCacheTest.class, UntrackedDirectoryListingTest.class,

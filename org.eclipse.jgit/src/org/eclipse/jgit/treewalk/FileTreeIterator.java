@@ -247,6 +247,34 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	}
 
 	/**
+	 * Validate monitor state before checkout metadata/content comparisons, then
+	 * optionally preload entries that still require filesystem metadata.
+	 * @param index index owned by this checkout
+	 * @param monitor cancellation monitor, or null
+	 * @throws IOException on invalid provider paths
+	 * @since 7.8
+	 */
+	public void prepareCheckout(DirCache index, ProgressMonitor monitor) throws IOException {
+		Repository repository = getRepository();
+		if (getClass() == FileTreeIterator.class && repository != null) {
+			var query = org.eclipse.jgit.util.FsMonitor.queryIndexForCheckout(repository, index);
+			query.invalidateUntrackedCache(repository, index);
+			Set<DirCacheEntry> trusted = query.getCheckoutValidEntries(repository, index);
+			Set<DirCacheEntry> dirty = new java.util.HashSet<>();
+			if (org.eclipse.jgit.util.FsMonitor.isConfigured(repository)) {
+				for (int i = 0; i < index.getEntryCount(); i++) {
+					DirCacheEntry entry = index.getEntry(i);
+					if (entry.getStage() == 0 && !entry.isAssumeValid()
+							&& !entry.isSkipWorkTree() && entry.getFileMode() != FileMode.GITLINK
+							&& !trusted.contains(entry)) dirty.add(entry);
+				}
+			}
+			configureCheckoutMonitor(trusted, dirty);
+		}
+		preloadIndex(index, monitor);
+	}
+
+	/**
 	 * Preload tracked metadata for this walk when core.preloadIndex is
 	 * enabled (the default). The index is not modified. Metadata is discarded with
 	 * this walk; existing content and racy-timestamp checks still apply.
@@ -283,8 +311,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 
 	@Override
 	public void setFsMonitorValidEntries(Collection<DirCacheEntry> entries) {
-		super.setFsMonitorValidEntries(entries);
 		monitorEntries = Set.copyOf(entries);
+		super.setFsMonitorValidEntries(monitorEntries);
 		monitorMetadata = !entries.isEmpty() && getClass() == FileTreeIterator.class
 				&& fs.getClass() == FS_POSIX.class && getRepository() != null
 				? IndexPreloader.fromMonitor(getRepository(), fs, entries) : null;
@@ -357,10 +385,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	}
 
 	private Entry[] entries() {
-		Map<String, FS.Attributes> attributes = preloaded == null ? null
-				: preloaded.takeDirectory(directory);
 		// Keep custom enumeration and Win32's attribute-aware listing intact.
-		if (attributes == null && fs.getClass() != FS_POSIX.class) {
+		if (fs.getClass() != FS_POSIX.class) {
 			return fs.list(directory, fileModeStrategy);
 		}
 		File[] files = untrackedScan != null ? untrackedScan.list(directory, untrackedListing)
@@ -369,6 +395,8 @@ public class FileTreeIterator extends WorkingTreeIterator {
 		if (files == null) {
 			return new Entry[0];
 		}
+		Map<String, FS.Attributes> attributes = preloaded == null ? null
+				: preloaded.takeDirectory(directory, files);
 		FS.Attributes[] parallel = fs.getClass() == FS_POSIX.class
 				? DirectoryMetadata.read(fs, files, attributes) : null;
 		Entry[] result = new Entry[files.length];

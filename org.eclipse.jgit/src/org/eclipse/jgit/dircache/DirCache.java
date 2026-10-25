@@ -1102,7 +1102,7 @@ public class DirCache {
 			}
 		}
 		boolean monitorChanged = repository != null
-				&& FsMonitor.isHookConfigured(repository)
+				&& FsMonitor.isConfigured(repository)
 				&& (fsMonitorPaths == null || !fsMonitorPaths.isEmpty());
 		if (indexChangedListener != null
 				&& (monitorChanged

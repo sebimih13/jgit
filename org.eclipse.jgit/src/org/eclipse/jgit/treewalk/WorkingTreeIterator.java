@@ -1004,6 +1004,42 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 	}
 
 	/**
+	 * Compare contents for checkout unless a current monitor query verified the
+	 * entry. Explicit caller verification requests always take precedence.
+	 * @param entry index entry to compare
+	 * @param reader object reader
+	 * @return whether working-tree contents differ
+	 * @throws IOException on content I/O failure
+	 * @since 7.8
+	 */
+	public boolean isModifiedForCheckout(DirCacheEntry entry, ObjectReader reader)
+			throws IOException {
+		boolean trusted = state.fsMonitorValidEntries.contains(entry)
+				&& !state.forceContentCheckEntries.contains(entry);
+		return isModified(entry, !trusted, reader);
+	}
+
+	/**
+	 * Preserve caller content-check requests while configuring monitor reuse.
+	 * @param trusted entries validated by the provider
+	 * @param dirty entries still requiring checks
+	 * @since 7.8
+	 */
+	protected void configureCheckoutMonitor(Collection<DirCacheEntry> trusted,
+			Collection<DirCacheEntry> dirty) {
+		Set<DirCacheEntry> forced = new java.util.HashSet<>(state.forceContentCheckEntries);
+		forced.addAll(dirty);
+		Collection<DirCacheEntry> valid = trusted;
+		if (forced.stream().anyMatch(trusted::contains)) {
+			Set<DirCacheEntry> filtered = new java.util.HashSet<>(trusted);
+			filtered.removeAll(forced);
+			valid = filtered;
+		}
+		setForceContentCheckEntries(forced);
+		setFsMonitorValidEntries(valid);
+	}
+
+	/**
 	 * Require content comparisons for selected index entries even when their
 	 * stat metadata matches. Size and mode differences retain their normal
 	 * semantics. The selection is shared with subtree iterators.

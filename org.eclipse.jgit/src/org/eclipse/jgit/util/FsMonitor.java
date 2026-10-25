@@ -43,7 +43,7 @@ import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 
 /**
- * Fsmonitor hook validation for status caches and native index correlation.
+ * Fsmonitor provider validation for status caches and native index correlation.
  * <p>
  * Stored FSMN validity requires a correlated provider query before reuse.
  * Whole-result caches separately retain a successful scan and serialize
@@ -116,6 +116,44 @@ public final class FsMonitor {
 	 */
 	public record IndexQuery(Probe probe, boolean forceContentCheck) {
 		/**
+		 * Select entries whose contents can be reused by checkout. Notifications,
+		 * unknown scope and case-insensitive contexts require verification.
+		 * @param repository repository queried
+		 * @param index matching index
+		 * @return operation-local trusted entries
+		 * @since 7.8
+		 */
+		public Set<DirCacheEntry> getCheckoutValidEntries(Repository repository, DirCache index) {
+			if (forceContentCheck || probe == null || !probe.validatesIndex(index)
+					|| probe.invalidationScopeUnknown
+					|| repository.getConfig().getBoolean("core", null, "ignoreCase", false)) { //$NON-NLS-1$ //$NON-NLS-2$
+				return Set.of();
+			}
+			Set<String> paths = new HashSet<>();
+			for (String path : probe.changedPaths) {
+				if (path.equals(".gitattributes") || path.endsWith("/.gitattributes") //$NON-NLS-1$ //$NON-NLS-2$
+						|| path.equals(".gitignore") || path.endsWith("/.gitignore")) { //$NON-NLS-1$ //$NON-NLS-2$
+					return Set.of();
+				}
+				paths.add(path.endsWith("/") ? path.substring(0, path.length() - 1) : path); //$NON-NLS-1$
+			}
+			Set<DirCacheEntry> trusted = probe.getIndexValidEntries(index);
+			for (String path : paths) {
+				int exact = index.findEntry(path);
+				if (exact >= 0) trusted.remove(index.getEntry(exact));
+				String prefix = path + "/"; //$NON-NLS-1$
+				int position = index.findEntry(prefix);
+				if (position < 0) position = -position - 1;
+				for (; position < index.getEntryCount(); position++) {
+					DirCacheEntry entry = index.getEntry(position);
+					if (!entry.getPathString().startsWith(prefix)) break;
+					trusted.remove(entry);
+				}
+			}
+			return trusted;
+		}
+
+		/**
 		 * Apply provider invalidation before consuming native directory records.
 		 * This changes only the operation-local model, never the index file.
 		 * @param repository repository queried
@@ -146,7 +184,7 @@ public final class FsMonitor {
 	 * Establish monitor storage before a repository-aware index mutation.
 	 * Existing entries start dirty even if the initial hook reports no paths.
 	 * Newly verified entries may subsequently be marked valid by the writer.
-	 * This method does not write the index or enable daemon IPC.
+	 * This method does not write the index or start a daemon.
 	 *
 	 * @param repository repository whose hook is configured
 	 * @param index index about to be mutated
@@ -157,20 +195,21 @@ public final class FsMonitor {
 			DirCache index) {
 		String hook = configuredHook(repository);
 		if (repository.isBare() || hook == null || hook.isEmpty()
-				|| isBooleanSetting(hook)) {
+				|| Boolean.FALSE.equals(UntrackedCacheConfig.parseBoolean(hook))) {
 			return null;
 		}
+		boolean daemon = isDaemonSetting(hook);
 		Instant now = Instant.now();
 		String boundary = Long.toUnsignedString(now.getEpochSecond()
 				* 1_000_000_000L + now.getNano());
 		State state = new State();
-		state.token = boundary;
-		state.version = 1;
+		state.token = daemon ? "0" : boundary; //$NON-NLS-1$
+		state.version = daemon ? 2 : 1;
 		Probe probe = state.query(repository, true, index);
-		int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
+		int requested = daemon ? 2 : repository.getConfig().getInt("core", null, //$NON-NLS-1$
 				"fsmonitorHookVersion", -1); //$NON-NLS-1$
 		String token = probe != null ? probe.token
-				: requested == 2 ? "" : boundary; //$NON-NLS-1$
+				: daemon ? "builtin:fake" : requested == 2 ? "" : boundary; //$NON-NLS-1$ //$NON-NLS-2$
 		BitSet dirty = new BitSet();
 		dirty.set(0, index.getEntryCount());
 		return new FsMonitorCache(Constants.encode(token), dirty);
@@ -264,9 +303,7 @@ public final class FsMonitor {
 				UntrackedCacheConfig.parseBoolean(hook))) {
 			return new IndexRefresh(null, null);
 		}
-		if (isBooleanSetting(hook)) {
-			return new IndexRefresh(previous, null); // No daemon IPC.
-		}
+		boolean daemon = isDaemonSetting(hook);
 		State state;
 		try {
 			state = storedState(repository, previous);
@@ -279,10 +316,10 @@ public final class FsMonitor {
 		String boundary = Long.toUnsignedString(now.getEpochSecond()
 				* 1_000_000_000L + now.getNano());
 		Probe probe = state.query(repository, true, index);
-		int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
+		int requested = daemon ? 2 : repository.getConfig().getInt("core", null, //$NON-NLS-1$
 				"fsmonitorHookVersion", -1); //$NON-NLS-1$
 		String token = probe != null ? probe.token
-				: requested == 2 ? "" : boundary; //$NON-NLS-1$
+				: daemon ? "builtin:fake" : requested == 2 ? "" : boundary; //$NON-NLS-1$ //$NON-NLS-2$
 		BitSet dirty = new BitSet();
 		Set<String> paths = new HashSet<>();
 		boolean full = probe == null || probe.invalidationScopeUnknown
@@ -326,12 +363,13 @@ public final class FsMonitor {
 
 	private static State storedState(Repository repository, FsMonitorCache stored)
 			throws CharacterCodingException {
+		boolean daemon = isDaemonSetting(configuredHook(repository));
 		State state = new State();
 		state.token = StandardCharsets.UTF_8.newDecoder()
 				.onMalformedInput(CodingErrorAction.REPORT)
 				.onUnmappableCharacter(CodingErrorAction.REPORT)
 				.decode(ByteBuffer.wrap(stored.getToken())).toString();
-		int requested = repository.getConfig().getInt("core", null, //$NON-NLS-1$
+		int requested = daemon ? 2 : repository.getConfig().getInt("core", null, //$NON-NLS-1$
 				"fsmonitorHookVersion", -1); //$NON-NLS-1$
 		state.version = requested == 1 || requested != 2
 				&& state.token.matches("[0-9]+") ? 1 : 2; //$NON-NLS-1$
@@ -400,10 +438,26 @@ public final class FsMonitor {
 	 * @since 7.8
 	 */
 	public static IndexQuery queryStoredIndex(Repository repository, DirCache index) {
+		if (isEnabled(repository)) {
+			return new IndexQuery(null, false);
+		}
+		return queryIndexForCheckout(repository, index);
+	}
+
+	/**
+	 * Validate persisted state for checkout independently of the status-result
+	 * cache, which cannot authorize checkout of working-tree contents.
+	 * @param repository repository to query
+	 * @param index already read index
+	 * @return provider query or conservative fallback
+	 * @since 7.8
+	 */
+	public static IndexQuery queryIndexForCheckout(Repository repository, DirCache index) {
 		FsMonitorCache stored = index.getFsMonitorCache();
 		String configured = configuredHook(repository);
-		if (stored == null || isEnabled(repository) || configured == null
-				|| configured.isEmpty() || isBooleanSetting(configured)) {
+		if (stored == null || configured == null
+				|| configured.isEmpty() || Boolean.FALSE.equals(
+						UntrackedCacheConfig.parseBoolean(configured))) {
 			return new IndexQuery(null, false);
 		}
 		try {
@@ -487,9 +541,22 @@ public final class FsMonitor {
 		 * @since 7.8
 		 */
 		public Set<DirCacheEntry> getIndexValidEntries(DirCache index) {
+			return getIndexValidEntries(index, null);
+		}
+
+		/**
+		 * Select validated metadata only for the supplied index positions.
+		 * @param index matching index
+		 * @param selected positions required by the walk, or null for all
+		 * @return operation-local trusted entry identities
+		 * @since 7.8
+		 */
+		public Set<DirCacheEntry> getIndexValidEntries(DirCache index, BitSet selected) {
 			Set<DirCacheEntry> result = new HashSet<>();
 			if (validatesIndex(index)) {
-				for (int i = 0; i < index.getEntryCount(); i++) {
+				for (int i = selected == null ? 0 : selected.nextSetBit(0);
+						i >= 0 && i < index.getEntryCount();
+						i = selected == null ? i + 1 : selected.nextSetBit(i + 1)) {
 					DirCacheEntry entry = index.getEntry(i);
 					if (!dirtyEntries.get(i) && entry.getStage() == 0
 							&& !entry.isAssumeValid() && !entry.isSkipWorkTree()
@@ -573,27 +640,29 @@ public final class FsMonitor {
 				fallback(lostCorrelation);
 				return null;
 			}
+			String configuredProvider = configuredHook(repository);
+			boolean daemon = isDaemonSetting(configuredProvider);
 			try (Trace2.Scope trace = Trace2.getInstance().region(repository,
-					"fsm_hook", "query")) { //$NON-NLS-1$ //$NON-NLS-2$
+					daemon ? "fsm_client" : "fsm_hook", "query")) { //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 				boolean supported = false;
 				try {
 					Config config = repository.getConfig();
-					int requestedVersion = config.getInt("core", null, //$NON-NLS-1$
+					int requestedVersion = daemon ? 2 : config.getInt("core", null, //$NON-NLS-1$
 							"fsmonitorHookVersion", -1); //$NON-NLS-1$
 					boolean auto = requestedVersion != 1
 							&& requestedVersion != 2;
-					int queryVersion = requestedVersion == 1 ? 1 : 2;
-					String hook = configuredHook(repository);
+					int queryVersion = daemon ? 2 : requestedVersion == 1 ? 1 : 2;
+					String hook = configuredProvider;
 					if (hook == null || hook.isEmpty()
-							|| isBooleanSetting(hook)) {
+							|| Boolean.FALSE.equals(UntrackedCacheConfig.parseBoolean(hook))) {
 						fallback(lostCorrelation);
 						return null;
 					}
-					File executable = new File(hook);
-					if (!executable.isAbsolute()) {
+					File executable = daemon ? repository.getDirectory() : new File(hook);
+					if (!daemon && !executable.isAbsolute()) {
 						executable = new File(repository.getWorkTree(), hook);
 					}
-					if (!executable.isFile() || !executable.canExecute()) {
+					if (!daemon && (!executable.isFile() || !executable.canExecute())) {
 						fallback(lostCorrelation);
 						return null;
 					}
@@ -649,7 +718,7 @@ public final class FsMonitor {
 					unsupportedIndex = null;
 					supported = true;
 					String key = fingerprint(repository, index,
-							executable.toPath());
+							daemon ? null : executable.toPath());
 					if (storedQuery && Arrays.equals(expectedChecksum, indexChecksum)) {
 						// The configured provider validates this persisted token;
 						// no process-local Status result is implied by this anchor.
@@ -666,11 +735,15 @@ public final class FsMonitor {
 					Instant now = Instant.now();
 					String timestamp = Long.toUnsignedString(now.getEpochSecond()
 							* 1_000_000_000L + now.getNano());
-					String since = storedQuery && token != null ? token
+					String since = daemon ? token != null && token.startsWith("builtin:") //$NON-NLS-1$
+							? token : "0" : storedQuery && token != null ? token //$NON-NLS-1$
 							: token != null && version == queryVersion ? token
 									: queryVersion == 1 ? timestamp : "c:0:0:0:0"; //$NON-NLS-1$
 					byte[] response;
-					try {
+					if (daemon) {
+						response = FsMonitorDaemonClient.query(repository, since);
+						trace.data("query/response-length", Integer.toString(response.length)); //$NON-NLS-1$
+					} else try {
 						response = Hooks.fsMonitor(repository, executable,
 								queryVersion, since).call();
 					} catch (IOException failure) {
@@ -714,7 +787,7 @@ public final class FsMonitor {
 					// invalidate reuse.
 					if (!key.equals(fingerprint(repository,
 							digest(repository.getIndexFile().toPath()),
-							executable.toPath()))) {
+							daemon ? null : executable.toPath()))) {
 						trace.data("query/failed", "context-changed"); //$NON-NLS-1$ //$NON-NLS-2$
 						clear();
 						fullContentCheckRequired = true;
@@ -791,6 +864,22 @@ public final class FsMonitor {
 		if (before == null || before.isEmpty() || after.isEmpty()) {
 			return false;
 		}
+		if (before.startsWith("builtin:") || after.startsWith("builtin:")) { //$NON-NLS-1$ //$NON-NLS-2$
+			String[] oldClock = before.split(":", -1); //$NON-NLS-1$
+			String[] newClock = after.split(":", -1); //$NON-NLS-1$
+			if (oldClock.length != 3 || newClock.length != 3
+					|| !oldClock[0].equals("builtin") || !newClock[0].equals("builtin") //$NON-NLS-1$ //$NON-NLS-2$
+					|| oldClock[1].isEmpty() || !oldClock[1].equals(newClock[1])
+					|| !oldClock[2].matches("[0-9]+") || !newClock[2].matches("[0-9]+")) { //$NON-NLS-1$ //$NON-NLS-2$
+				return false;
+			}
+			try {
+				return Long.compareUnsigned(Long.parseUnsignedLong(newClock[2]),
+						Long.parseUnsignedLong(oldClock[2])) >= 0;
+			} catch (NumberFormatException invalidClock) {
+				return false;
+			}
+		}
 		if (!before.startsWith("c:") && !after.startsWith("c:")) { //$NON-NLS-1$ //$NON-NLS-2$
 			return true; // Other providers must honor the hook v2 contract.
 		}
@@ -833,7 +922,7 @@ public final class FsMonitor {
 				fingerprintConfig(md, config, section, subsection);
 			}
 		}
-		update(md, digest(executable));
+		update(md, executable == null ? "builtin" : digest(executable)); //$NON-NLS-1$
 		update(md, digest(
 				repo.getCommonDirectory().toPath().resolve("info/exclude"))); //$NON-NLS-1$
 		update(md, digest(
@@ -860,9 +949,12 @@ public final class FsMonitor {
 		return HexFormat.of().formatHex(md.digest());
 	}
 
+	private static boolean isDaemonSetting(String value) {
+		return value != null && isBooleanSetting(value)
+				&& Boolean.TRUE.equals(UntrackedCacheConfig.parseBoolean(value));
+	}
+
 	// C Git parse.c: boolean text or a signed int with base-0 and k/m/g units.
-	// Boolean true selects Git's daemon, which this hook-only client cannot
-	// use.
 	private static boolean isBooleanSetting(String value) {
 		if (StringUtils.toBooleanOrNull(value) != null) {
 			return true;

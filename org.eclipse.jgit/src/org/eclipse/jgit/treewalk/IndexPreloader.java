@@ -10,8 +10,8 @@
 package org.eclipse.jgit.treewalk;
 
 import java.io.File;
+import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.HashMap;
@@ -28,6 +28,7 @@ import java.util.concurrent.TimeoutException;
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
+import org.eclipse.jgit.internal.util.IndexEntrySelection;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Repository;
@@ -45,17 +46,33 @@ final class IndexPreloader {
 
 	private final Map<File, Map<String, FS.Attributes>> directories = new HashMap<>();
 
+	private final Map<File, Map<String, MonitorEntry>> monitoredDirectories = new HashMap<>();
+
+	private record MonitorEntry(FileMode mode, Instant modified, long length) {
+	}
+
+	private FS monitorFs;
+
 	private long statCalls;
 
 	static IndexPreloader fromMonitor(Repository repository, FS fs,
 			Collection<DirCacheEntry> entries) {
 		IndexPreloader result = new IndexPreloader();
+		result.monitorFs = fs;
+		Map<String, File> parents = new HashMap<>();
+		File root = repository.getWorkTree();
 		for (DirCacheEntry entry : entries) {
-			File file = fs.normalize(new File(repository.getWorkTree(), entry.getPathString()));
-			result.directories.computeIfAbsent(file.getParentFile(), unused -> new HashMap<>())
-					.put(file.getName(), FS.Attributes.fromIndex(fs, file,
-							entry.getFileMode(), entry.getLastModifiedInstant(),
-							Integer.toUnsignedLong(entry.getLength())));
+			String path = entry.getPathString();
+			int slash = path.lastIndexOf('/');
+			String directory = slash < 0 ? "" : path.substring(0, slash); //$NON-NLS-1$
+			File parent = parents.computeIfAbsent(directory,
+					key -> fs.normalize(new File(root, key)));
+			result.monitoredDirectories
+					.computeIfAbsent(parent, unused -> new HashMap<>())
+					.put(fs.normalize(path.substring(slash + 1)),
+							new MonitorEntry(entry.getFileMode(),
+									entry.getLastModifiedInstant(),
+									Integer.toUnsignedLong(entry.getLength())));
 		}
 		return result;
 	}
@@ -84,14 +101,14 @@ final class IndexPreloader {
 			if (paths.isEmpty()) {
 				return monitored;
 			}
-			selected = select(index, paths.get(), monitor);
+			selected = IndexEntrySelection.select(index, paths.get(), monitor);
 			if (selected != null && selected.isEmpty()) {
 				return monitored;
 			}
 		}
-		BitSet eligible = selected;
-		int threads = Math.min(MAX_PARALLEL,
-				index.getEntryCount() / THREAD_COST);
+		int[] positions = selected == null ? null : selected.stream().toArray();
+		int workCount = positions == null ? index.getEntryCount() : positions.length;
+		int threads = Math.min(MAX_PARALLEL, workCount / THREAD_COST);
 		if (index.getEntryCount() > 1 && threads < 2
 				&& Boolean.TRUE.equals(UntrackedCacheConfig.parseBoolean(
 						SystemReader.getInstance().getenv("GIT_TEST_PRELOAD_INDEX")))) { //$NON-NLS-1$
@@ -110,14 +127,13 @@ final class IndexPreloader {
 					worker.setDaemon(true);
 					return worker;
 				});
-				int work = (index.getEntryCount() + threads - 1) / threads;
-				for (int offset = 0; offset < index
-						.getEntryCount(); offset += work) {
+				int work = (workCount + threads - 1) / threads;
+				for (int offset = 0; offset < workCount; offset += work) {
 					int start = offset;
-					int end = Math.min(index.getEntryCount(), offset + work);
+					int end = Math.min(workCount, offset + work);
 					tasks.add(
 							executor.submit(() -> read(repository.getWorkTree(),
-									fs, index, start, end, trusted, eligible)));
+									fs, index, start, end, trusted, positions)));
 				}
 				IndexPreloader result = monitored == null ? new IndexPreloader() : monitored;
 				for (Future<IndexPreloader> task : tasks) {
@@ -163,44 +179,6 @@ final class IndexPreloader {
 		}
 	}
 
-	private static BitSet select(DirCache index, Collection<byte[]> paths,
-			ProgressMonitor monitor) {
-		BitSet selected = new BitSet();
-		for (byte[] path : paths) {
-			if (cancelled(monitor)) {
-				return selected;
-			}
-			int length = path.length;
-			while (length > 0 && path[length - 1] == '/') {
-				length--;
-			}
-			if (length == 0) {
-				return null;
-			}
-			int exact = index.findEntry(path, length);
-			if (exact >= 0) {
-				selected.set(exact);
-			}
-			byte[] prefix = Arrays.copyOf(path, length + 1);
-			prefix[length] = '/';
-			int start = index.findEntry(prefix, prefix.length);
-			if (start < 0) {
-				start = -start - 1;
-			}
-			for (int i = start; i < index.getEntryCount(); i++) {
-				byte[] candidate = index.getEntry(i).getRawPath();
-				if (candidate.length < prefix.length || Arrays.mismatch(prefix, 0,
-						prefix.length, candidate, 0, prefix.length) >= 0) {
-					break;
-				}
-				selected.set(i);
-				if ((i & 255) == 0 && cancelled(monitor)) {
-					return selected;
-				}
-			}
-		}
-		return selected;
-	}
 
 	private static boolean cancelled(ProgressMonitor monitor) {
 		return Thread.currentThread().isInterrupted()
@@ -208,14 +186,12 @@ final class IndexPreloader {
 	}
 
 	private static IndexPreloader read(File root, FS fs, DirCache index,
-			int start, int end, Set<DirCacheEntry> trusted, BitSet selected) {
+			int start, int end, Set<DirCacheEntry> trusted, int[] selected) {
 		IndexPreloader result = new IndexPreloader();
 		Map<File, Boolean> safeDirectories = new HashMap<>();
-		for (int i = start; i < end
-				&& !Thread.currentThread().isInterrupted(); i++) {
-			if (selected != null && !selected.get(i)) {
-				continue;
-			}
+		for (int position = start; position < end
+				&& !Thread.currentThread().isInterrupted(); position++) {
+			int i = selected == null ? position : selected[position];
 			DirCacheEntry entry = index.getEntry(i);
 			if (trusted.contains(entry) || entry.getStage() != 0 || entry.isAssumeValid()
 					|| entry.isSkipWorkTree()
@@ -266,6 +242,30 @@ final class IndexPreloader {
 	}
 
 	Map<String, FS.Attributes> takeDirectory(File directory) {
-		return directories.remove(directory);
+		return takeDirectory(directory, null);
+	}
+
+	Map<String, FS.Attributes> takeDirectory(File directory, File[] files) {
+		Map<String, FS.Attributes> result = directories.remove(directory);
+		Map<String, MonitorEntry> trusted = monitoredDirectories.remove(directory);
+		if (trusted == null) {
+			return result;
+		}
+		if (result == null) {
+			result = new HashMap<>();
+		}
+		if (files == null) {
+			files = trusted.keySet().stream()
+					.map(name -> new File(directory, name)).toArray(File[]::new);
+		}
+		for (File file : files) {
+			String name = monitorFs.normalize(file.getName());
+			MonitorEntry entry = trusted.get(name);
+			if (entry != null && !result.containsKey(name)) {
+				result.put(name, FS.Attributes.fromIndex(monitorFs, monitorFs.normalize(file),
+						entry.mode(), entry.modified(), entry.length()));
+			}
+		}
+		return result;
 	}
 }
