@@ -157,6 +157,44 @@ public class FsMonitorInitializationTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void firstScanUsesVersionOneBoundariesBeforePublication() throws Exception {
+		checkFirstScanVersion(false);
+	}
+
+	@Test
+	public void firstScanAutoFallbackRetainsNumericPublicationBoundaries() throws Exception {
+		checkFirstScanVersion(true);
+	}
+
+	private void checkFirstScanVersion(boolean auto) throws Exception {
+		NativeFsMonitorIndexSupport.prepareWithoutExtension(db);
+		db.getConfig().setBoolean("core", null, "untrackedCache", true);
+		db.getConfig().setString("status", null, "showUntrackedFiles", "all");
+		if (auto) db.getConfig().unset("core", null, "fsmonitorHookVersion");
+		else db.getConfig().setInt("core", null, "fsmonitorHookVersion", 1);
+		db.getConfig().save();
+		Path calls = db.getDirectory().toPath().resolve("bootstrap-version-calls");
+		Files.writeString(Path.of(db.getConfig().getString("core", null, "fsmonitor")),
+				"#!/bin/sh\nprintf '%s:%s\\n' \"$1\" \"$2\" >> .git/bootstrap-version-calls\n"
+				+ "[ \"$1\" = 1 ] || exit 1\n");
+		var diff = new org.eclipse.jgit.lib.IndexDiff(db,
+				org.eclipse.jgit.lib.Constants.HEAD, new org.eclipse.jgit.treewalk.FileTreeIterator(db, true));
+		diff.setReportIgnored(false);
+		diff.diff();
+		assertNull(db.readDirCache().getFsMonitorCache());
+		assertTrue(diff.updateUntrackedCache());
+		var queries = Files.readAllLines(calls);
+		assertEquals(auto ? 4 : 2, queries.size());
+		for (int i = 0; i < queries.size(); i++) {
+			assertTrue(queries.get(i).matches((auto && i % 2 == 0 ? "2" : "1") + ":[0-9]+"));
+		}
+		var index = db.readDirCache();
+		assertTrue(index.getUntrackedCache().root.valid);
+		assertTrue(new String(index.getFsMonitorCache().getToken(), StandardCharsets.US_ASCII).matches("[0-9]+"));
+		assertTrue(index.getFsMonitorCache().getDirtyEntries().isEmpty());
+	}
+
+	@Test
 	public void rawReadsDoNotQueryProviderOrCreateIndexStorage()
 			throws Exception {
 		NativeFsMonitorIndexSupport.prepareWithoutExtension(db);

@@ -272,14 +272,31 @@ public class DirCache {
 	public static DirCache lock(final Repository repository,
 			final IndexChangedListener indexChangedListener)
 			throws CorruptObjectException, IOException {
+		return lock(repository, indexChangedListener, null);
+	}
+
+	/**
+	 * Lock an index for publication of a completed monitored scan. The scan
+	 * boundary is accepted only for the same index and repository context.
+	 * @param repository repository containing the index
+	 * @param indexChangedListener listener receiving all consumed notifications
+	 * @param scan query preceding the completed scan, or null for ordinary locking
+	 * @return locked, freshly read and monitor-refreshed index
+	 * @throws IOException if the index cannot be locked, read or refreshed
+	 * @since 7.8
+	 */
+	public static DirCache lock(Repository repository,
+			IndexChangedListener indexChangedListener, FsMonitor.Probe scan)
+			throws IOException {
 		DirCache c = lock(repository.getIndexFile(), repository.getFS(),
 				indexChangedListener);
 		c.repository = repository;
 		try {
 			if (!c.fsMonitorCacheExplicit) {
-				var refresh = FsMonitor.refreshIndexWithChanges(repository, c);
+				var refresh = FsMonitor.refreshIndexWithChanges(repository, c, scan);
 				c.fsMonitorCache = refresh.cache();
 				c.fsMonitorPaths = refresh.paths();
+				c.fsMonitorPublicationPaths = refresh.publicationPaths();
 				if (c.fsMonitorCache == null) {
 					c.clearFsMonitorBits();
 				} else {
@@ -345,6 +362,17 @@ public class DirCache {
 	private boolean fsMonitorCacheExplicit;
 
 	private Set<String> fsMonitorPaths;
+
+	private Set<String> fsMonitorPublicationPaths;
+
+	/**
+	 * Get notifications consumed by this writer after the supplied scan boundary.
+	 * @return immutable late paths, or null when scope is unknown
+	 * @since 7.8
+	 */
+	public Set<String> getFsMonitorPublicationPaths() {
+		return fsMonitorPublicationPaths == null ? null : Set.copyOf(fsMonitorPublicationPaths);
+	}
 
 	private boolean untrackedCacheExplicit;
 
@@ -464,20 +492,20 @@ public class DirCache {
 			throw new IllegalStateException("Repository-aware index lock required"); //$NON-NLS-1$
 		}
 		if (cache != null && FsMonitor.isConfigured(repository)) {
-			if (fsMonitorPaths == null) {
+			if (fsMonitorPublicationPaths == null) {
 				cache.invalidateAll();
 			} else {
-				for (String path : fsMonitorPaths) {
+				for (String path : fsMonitorPublicationPaths) {
 					cache.invalidateWorkingTreePath(Constants.encode(path));
 				}
 			}
 		}
-		if (fsMonitorCache != null && fsMonitorPaths != null) {
+		if (fsMonitorCache != null && fsMonitorPublicationPaths != null) {
 			for (String path : verified) {
-				boolean notified = fsMonitorPaths.contains(path);
+				boolean notified = fsMonitorPublicationPaths.contains(path);
 				for (int slash = path.lastIndexOf('/'); !notified && slash >= 0;
 						slash = path.lastIndexOf('/', slash - 1)) {
-					notified = fsMonitorPaths.contains(path.substring(0, slash));
+					notified = fsMonitorPublicationPaths.contains(path.substring(0, slash));
 				}
 				DirCacheEntry entry = getEntry(path);
 				if (!notified && entry != null && entry.getStage() == 0
@@ -677,6 +705,7 @@ public class DirCache {
 		untrackedCache = null;
 		fsMonitorCache = null;
 		fsMonitorPaths = null;
+		fsMonitorPublicationPaths = null;
 		fsMonitorCacheExplicit = false;
 		untrackedCacheExplicit = false;
 		untrackedCacheIndexState = null;
@@ -1111,6 +1140,7 @@ public class DirCache {
 					new IndexChangedEvent(true, fsMonitorPaths, writeIndexChecksum));
 		}
 		fsMonitorPaths = null;
+		fsMonitorPublicationPaths = null;
 		return true;
 	}
 

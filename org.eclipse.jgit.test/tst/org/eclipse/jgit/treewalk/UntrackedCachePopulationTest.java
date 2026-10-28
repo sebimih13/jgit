@@ -239,18 +239,142 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void scanBoundaryPreventsReplayingCoveredNotifications() throws Exception {
+		checkScanBoundary(false, false, false);
+	}
+
+	@Test
+	public void repeatedPathAfterScanRemainsDirty() throws Exception {
+		checkScanBoundary(true, false, false);
+	}
+
+	@Test
+	public void reportedCleanEntryRegainsItsPriorValidity() throws Exception {
+		checkScanBoundary(false, true, false);
+	}
+
+	@Test
+	public void reportedModifiedEntryLosesItsPriorValidity() throws Exception {
+		checkScanBoundary(false, true, true);
+	}
+
+	@Test
+	public void fullRootScanCanPublishBeforeAnotherQuietScan() throws Exception {
+		checkScanBoundary(false, true, false, true);
+	}
+
+	@Test
+	public void fullRootScanPreservesNotificationsArrivingAfterItsClock() throws Exception {
+		checkScanBoundary(true, true, false, true);
+	}
+
+	@Test
+	public void fullRootScanKeepsModifiedEntriesDirty() throws Exception {
+		checkScanBoundary(false, true, true, true);
+	}
+
+	private void checkScanBoundary(boolean late, boolean validBeforeScan,
+			boolean modifiedBeforeScan) throws Exception {
+		checkScanBoundary(late, validBeforeScan, modifiedBeforeScan, false);
+	}
+
+	private void checkScanBoundary(boolean late, boolean validBeforeScan,
+			boolean modifiedBeforeScan, boolean rootReply) throws Exception {
+		prepare();
+		Path hook = enableMonitor();
+		markAllDirty();
+		if (validBeforeScan) {
+			var index = db.lockDirCache();
+			try {
+				index.setFsMonitorCache(new org.eclipse.jgit.internal.storage.file.FsMonitorCache(
+						Constants.encode("initial-clock"), new java.util.BitSet()));
+				index.write();
+				assertTrue(index.commit());
+			} finally {
+				index.unlock();
+			}
+		}
+		assertEquals(validBeforeScan, db.readDirCache().getFsMonitorCache().getDirtyEntries().isEmpty());
+		// The hook remains unchanged across both queries. The second query must
+		// use the scan clock, rather than subtracting overlapping path names.
+		Files.writeString(hook, "#!/bin/sh\n"
+				+ "printf '%s\\n' \"$2\" >> .git/scan-queries\n"
+				+ "if test \"$2\" = scan-clock; then\n"
+				+ (late ? "  printf 'next\\n' > sub/tracked\n"
+						+ "  touch -r .git/scan-stamp sub/tracked\n"
+						+ "  printf 'late\\n' > sub/late\n"
+						+ "  printf 'writer-clock\\000sub/tracked\\000sub/late\\000'\n"
+						: "  printf 'writer-clock\\000'\n")
+				+ (rootReply ? "else\n  printf 'scan-clock\\000/\\000'\nfi\n"
+						: "else\n  printf 'scan-clock\\000sub/tracked\\000sub/loose\\000'\nfi\n"));
+		Path tracked = db.getWorkTree().toPath().resolve("sub/tracked");
+		Path stamp = db.getDirectory().toPath().resolve("scan-stamp");
+		Files.writeString(stamp, "");
+		Files.setLastModifiedTime(stamp, Files.getLastModifiedTime(tracked));
+		if (modifiedBeforeScan) {
+			Files.writeString(tracked, "edit\n");
+			Files.setLastModifiedTime(tracked, Files.getLastModifiedTime(stamp));
+		}
+		var diff = recordedDiff();
+		assertEquals(modifiedBeforeScan ? Set.of("sub/tracked") : Set.of(), diff.getModified());
+		var events = new java.util.ArrayList<org.eclipse.jgit.events.IndexChangedEvent>();
+		var listener = db.getListenerList().addIndexChangedListener(events::add);
+		try {
+			assertTrue(diff.updateUntrackedCache());
+		} finally {
+			listener.remove();
+		}
+		assertEquals(java.util.List.of("initial-clock", "scan-clock"),
+				Files.readAllLines(db.getDirectory().toPath().resolve("scan-queries")));
+		var index = db.readDirCache();
+		assertTrue(index.getUntrackedCache().root.valid);
+		assertEquals(!late, index.getUntrackedCache().root.directories.get(0).valid);
+		assertEquals(late || modifiedBeforeScan, index.getFsMonitorCache().getDirtyEntries()
+				.get(index.findEntry("sub/tracked")));
+		assertEquals(late || modifiedBeforeScan ? 1 : 0, index.getFsMonitorCache().getDirtyEntries().cardinality());
+		assertEquals(1, events.size());
+		assertEquals(rootReply ? null : late
+				? Set.of("sub/tracked", "sub/loose", "sub/late")
+				: Set.of("sub/tracked", "sub/loose"), events.get(0).getFsMonitorPaths());
+		Files.writeString(hook, "#!/bin/sh\nprintf 'after-clock\\000'\n");
+		try (Git git = Git.wrap(db)) {
+			var status = git.status().setReportIgnored(false).call();
+			assertEquals(late || modifiedBeforeScan ? Set.of("sub/tracked") : Set.of(), status.getModified());
+			assertEquals(late ? Set.of("loose", "sub/loose", "sub/.gitignore", "sub/late")
+					: Set.of("loose", "sub/loose", "sub/.gitignore"), status.getUntracked());
+			assertNativeStatus(status);
+		}
+	}
+
+	@Test
+	public void changedContextRejectsScanBoundaryAndVerifiedBits() throws Exception {
+		prepare();
+		enableMonitor();
+		markAllDirty();
+		var diff = recordedDiff();
+		db.getConfig().setBoolean("core", null, "filemode",
+				!db.getConfig().getBoolean("core", null, "filemode", true));
+		assertTrue(diff.updateUntrackedCache());
+		var index = db.readDirCache();
+		assertFalse(index.getUntrackedCache().root.valid);
+		assertFalse(index.getUntrackedCache().root.directories.get(0).valid);
+		assertEquals(index.getEntryCount(), index.getFsMonitorCache().getDirtyEntries().cardinality());
+	}
+
+	@Test
 	public void writerQueryAfterScanInvalidatesOnlyAffectedCacheDirectories() throws Exception {
 		prepare();
 		Path hook = enableMonitor();
-		var diff = recordedDiff();
 		Path stamp = db.getDirectory().toPath().resolve("tracked-stamp");
 		Files.writeString(stamp, "");
 		Files.setLastModifiedTime(stamp,
 				Files.getLastModifiedTime(db.getWorkTree().toPath().resolve("sub/tracked")));
 		// The writer query mutates the worktree after build() validated its inputs.
-		Files.writeString(hook, "#!/bin/sh\nprintf 'next\\n' > sub/tracked\n"
+		Files.writeString(hook, "#!/bin/sh\nif test -e .git/index.lock; then\n"
+				+ "printf 'next\\n' > sub/tracked\n"
 				+ "touch -r .git/tracked-stamp sub/tracked\n"
-				+ "printf 'late\\n' > sub/late\ncat .git/fsmonitor-index.response\n");
+				+ "printf 'late\\n' > sub/late\nfi\ncat .git/fsmonitor-index.response\n");
+		var diff = recordedDiff();
 		org.eclipse.jgit.junit.NativeFsMonitorIndexSupport.reportToken(db, "late-clock",
 				"sub/tracked", "sub/late");
 		var events = new java.util.ArrayList<org.eclipse.jgit.events.IndexChangedEvent>();
@@ -296,8 +420,9 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 	public void failedWriterQueryPublishesOnlyInvalidDirectoryRecords() throws Exception {
 		prepare();
 		Path hook = enableMonitor();
+		Files.writeString(hook, "#!/bin/sh\nif test -e .git/index.lock; then exit 1; fi\n"
+				+ "cat .git/fsmonitor-index.response\n");
 		var diff = recordedDiff();
-		Files.writeString(hook, "#!/bin/sh\nexit 1\n");
 		assertTrue(diff.updateUntrackedCache());
 		var index = db.readDirCache();
 		assertFalse(index.getUntrackedCache().root.valid);
@@ -407,18 +532,119 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 	public void firstMonitorPublicationInitializesBeforeLaterCleanReuse() throws Exception {
 		prepare();
 		enableMonitor(false);
+		// Keep this bitmap assertion independent of smudged-entry metadata
+		// updates, which conservatively invalidate validity during write().
+		for (String path : Set.of("tracked", "sub/tracked")) {
+			Files.setLastModifiedTime(db.getWorkTree().toPath().resolve(path),
+					FileTime.fromMillis(System.currentTimeMillis() - 60000));
+		}
+		var refreshed = org.eclipse.jgit.junit.NativeFsMonitorIndexSupport.mutate(db,
+				"-c", "core.fsmonitor=false", "update-index", "--refresh", "--force-write-index");
+		Files.copy(refreshed.index(), db.getIndexFile().toPath(),
+				java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+				java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
 		assertNull(db.readDirCache().getFsMonitorCache());
 		assertTrue(recordedDiff().updateUntrackedCache());
 		var first = db.readDirCache();
 		assertNotNull(first.getFsMonitorCache());
-		assertFalse(first.getUntrackedCache().root.valid);
-		assertEquals(first.getEntryCount(), first.getFsMonitorCache().getDirtyEntries().cardinality());
+		assertTrue(first.getUntrackedCache().root.valid);
+		assertTrue(first.getFsMonitorCache().getDirtyEntries().isEmpty());
+		assertEquals(Set.of("loose", "sub/loose", "sub/.gitignore"), nativeStatus());
 		org.eclipse.jgit.junit.NativeFsMonitorIndexSupport.reportToken(db, "reused-clock");
 		assertTrue(recordedDiff().updateUntrackedCache());
 		var second = db.readDirCache();
 		assertTrue(second.getUntrackedCache().root.valid);
 		assertTrue(second.getFsMonitorCache().getDirtyEntries().isEmpty());
 		assertEquals(Set.of("loose", "sub/loose", "sub/.gitignore"), nativeStatus());
+	}
+
+	@Test
+	public void firstReadOnlyStatusChecksSameStatContentWithoutCreatingFSMN() throws Exception {
+		checkFirstReadOnlyStatus(false);
+	}
+
+	@Test
+	public void failedFirstQueryStillChecksContentWithoutWritingTheIndex() throws Exception {
+		checkFirstReadOnlyStatus(true);
+	}
+
+	private void checkFirstReadOnlyStatus(boolean failure) throws Exception {
+		prepare();
+		Path hook = enableMonitor(false);
+		Path tracked = db.getWorkTree().toPath().resolve("sub/tracked");
+		Files.setLastModifiedTime(tracked, FileTime.fromMillis(System.currentTimeMillis() - 60000));
+		var nativeIndex = org.eclipse.jgit.junit.NativeFsMonitorIndexSupport.mutate(db,
+				"-c", "core.fsmonitor=false", "update-index", "--refresh", "--force-write-index");
+		Files.copy(nativeIndex.index(), db.getIndexFile().toPath(),
+				java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+				java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
+		assertNull(db.readDirCache().getFsMonitorCache());
+		assertFalse(db.readDirCache().getEntry("sub/tracked").isSmudged());
+		var time = Files.getLastModifiedTime(tracked);
+		TimeUnit.MILLISECONDS.sleep(1010 - System.currentTimeMillis() % 1000);
+		Files.writeString(tracked, "edit\n");
+		Files.setLastModifiedTime(tracked, time);
+		if (failure) {
+			Files.writeString(hook, "#!/bin/sh\nexit 1\n");
+		}
+		byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
+		try (Git git = Git.wrap(db)) {
+			var status = git.status().setReportIgnored(false).call();
+			assertEquals(Set.of("sub/tracked"), status.getModified());
+			assertNativeStatus(status);
+		}
+		assertArrayEquals(original, Files.readAllBytes(db.getIndexFile().toPath()));
+		assertNull(db.readDirCache().getFsMonitorCache());
+	}
+
+	@Test
+	public void firstPublicationKeepsChangesAfterTheInitialScanClock() throws Exception {
+		prepare();
+		Path hook = enableMonitor(false);
+		Files.writeString(hook, "#!/bin/sh\n"
+				+ "printf '%s\\n' \"$2\" >> .git/bootstrap-queries\n"
+				+ "if test -e .git/index.lock; then\n"
+				+ "  printf 'edit\\n' > sub/tracked\n"
+				+ "  printf 'late\\n' > sub/late\n"
+				+ "  printf 'writer-clock\\000sub/tracked\\000sub/late\\000'\n"
+				+ "else\n  printf 'scan-clock\\000'\nfi\n");
+		var diff = recordedDiff();
+		assertNull(db.readDirCache().getFsMonitorCache());
+		assertTrue(diff.updateUntrackedCache());
+		var calls = Files.readAllLines(db.getDirectory().toPath().resolve("bootstrap-queries"));
+		assertEquals(2, calls.size());
+		assertEquals("scan-clock", calls.get(1));
+		var index = db.readDirCache();
+		assertTrue(index.getUntrackedCache().root.valid);
+		assertFalse(index.getUntrackedCache().root.directories.get(0).valid);
+		assertEquals(1, index.getFsMonitorCache().getDirtyEntries().cardinality());
+		assertTrue(index.getFsMonitorCache().isDirty(index.findEntry("sub/tracked")));
+		try (Git git = Git.wrap(db)) {
+			assertNativeStatus(git.status().setReportIgnored(false).call());
+		}
+	}
+
+	@Test
+	public void firstUnbornScanCanPublishAnInitiallyAbsentIndex() throws Exception {
+		assumeTrue(db.getFS().getClass() == FS_POSIX.class);
+		db.getConfig().setBoolean("core", null, "untrackedCache", true);
+		db.getConfig().setString("status", null, "showUntrackedFiles", "all");
+		enableMonitor(false);
+		writeTrashFile("loose", "new\n");
+		writeTrashFile("sub/loose", "new\n");
+		assertTrue(Files.notExists(db.getIndexFile().toPath()));
+		try (Git git = Git.wrap(db)) {
+			assertEquals(Set.of("loose", "sub/loose"),
+					git.status().setReportIgnored(false).call().getUntracked());
+			assertTrue(Files.notExists(db.getIndexFile().toPath()));
+			var status = git.status().setReportIgnored(false).setUpdateUntrackedCache(true).call();
+			assertEquals(Set.of("loose", "sub/loose"), status.getUntracked());
+			assertNativeStatus(status);
+		}
+		var index = db.readDirCache();
+		assertEquals(0, index.getEntryCount());
+		assertNotNull(index.getFsMonitorCache());
+		assertTrue(index.getUntrackedCache().root.valid);
 	}
 
 	@Test

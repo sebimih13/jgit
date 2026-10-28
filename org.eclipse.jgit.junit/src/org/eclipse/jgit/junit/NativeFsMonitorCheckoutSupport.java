@@ -66,6 +66,22 @@ public final class NativeFsMonitorCheckoutSupport {
 	 */
 	public static Scenario prepare(Repository db, String mode,
 			boolean resultCache) throws Exception {
+		return prepare(db, mode, resultCache, null, false);
+	}
+
+	/**
+	 * Prepare native checkout parity with a tracked-path optimization flag.
+	 * @param db disposable repository
+	 * @param mode reported, dirty, failure, root or disabled monitor mode
+	 * @param resultCache whether the Java status-result cache is enabled
+	 * @param flag native update-index option, or null for ordinary entries
+	 * @param clean whether to leave the worktree file unchanged
+	 * @return independently native-verified checkout scenario
+	 * @throws Exception on fixture or native-oracle failure
+	 * @since 7.8
+	 */
+	public static Scenario prepare(Repository db, String mode,
+			boolean resultCache, String flag, boolean clean) throws Exception {
 		NativeFsMonitorIndexSupport.prepare(db);
 		String provider = db.getConfig().getString("core", null, "fsmonitor");
 		ObjectId base = java.util.Objects
@@ -123,13 +139,27 @@ public final class NativeFsMonitorCheckoutSupport {
 					index.unlock();
 				}
 			}
+			if (flag != null) {
+				installNative(db, "update-index", flag, "a");
+				var entry = db.readDirCache().getEntry("a");
+				assertEquals(flag.equals("--assume-unchanged"),
+						entry.isAssumeValid());
+				assertEquals(flag.equals("--skip-worktree"),
+						entry.isSkipWorkTree());
+			}
+			if (mode.equals("disabled")) {
+				db.getConfig().setBoolean("core", null, "fsmonitor", false);
+				db.getConfig().save();
+			}
 			var time = Files.getLastModifiedTime(file);
 			// The pinned C Git defaults core.useNanoSec to false. Cross a
 			// ctime second while keeping the indexed mtime identical.
-			long now = System.currentTimeMillis();
-			TimeUnit.MILLISECONDS.sleep(1010 - now % 1000);
-			Files.writeString(file, "edit\n");
-			Files.setLastModifiedTime(file, time);
+			if (!clean) {
+				long now = System.currentTimeMillis();
+				TimeUnit.MILLISECONDS.sleep(1010 - now % 1000);
+				Files.writeString(file, "edit\n");
+				Files.setLastModifiedTime(file, time);
+			}
 			NativeFsMonitorIndexSupport.reportToken(db, "checkout-clock",
 					mode.equals("reported") ? new String[] { "a" }
 							: mode.equals("root") ? new String[] { "/" }
@@ -144,7 +174,7 @@ public final class NativeFsMonitorCheckoutSupport {
 										.getObjectId()).getBytes(),
 								java.nio.charset.StandardCharsets.UTF_8));
 			}
-			assertNativeConflict(db, target);
+			assertNativeCheckout(db, target, !clean);
 			return new Scenario(base, target, file, original);
 		}
 	}
@@ -156,16 +186,18 @@ public final class NativeFsMonitorCheckoutSupport {
 				StandardCopyOption.REPLACE_EXISTING);
 	}
 
-	private static void assertNativeConflict(Repository db, ObjectId target)
-			throws Exception {
+	private static void assertNativeCheckout(Repository db, ObjectId target,
+			boolean conflict) throws Exception {
 		Path index = db.getDirectory().toPath()
 				.resolve("checkout-oracle.index");
 		Files.copy(db.getIndexFile().toPath(), index,
 				StandardCopyOption.REPLACE_EXISTING);
 		Path output = db.getDirectory().toPath().resolve("checkout-oracle.out");
-		var command = List.of(
-				System.getProperty("jgit.test.gitExecutable", "git"),
-				"--no-optional-locks", "checkout", "--detach", target.name());
+		String git = System.getProperty("jgit.test.gitExecutable", "git");
+		var command = conflict
+				? List.of(git, "--no-optional-locks", "checkout", "--detach", target.name())
+				: List.of(git, "--no-optional-locks", "read-tree", "--dry-run", "-m", "-u",
+						java.util.Objects.requireNonNull(db.resolve(Constants.HEAD)).name(), target.name());
 		var builder = new ProcessBuilder(command).directory(db.getWorkTree())
 				.redirectErrorStream(true).redirectOutput(output.toFile());
 		builder.environment().keySet()
@@ -182,8 +214,10 @@ public final class NativeFsMonitorCheckoutSupport {
 		Process process = builder.start();
 		try {
 			assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-			assertEquals(Files.readString(output), 1, process.exitValue());
-			assertTrue(Files.readString(output).contains("overwritten"));
+			assertEquals(Files.readString(output), conflict ? 1 : 0, process.exitValue());
+			if (conflict) {
+				assertTrue(Files.readString(output).contains("overwritten"));
+			}
 		} finally {
 			process.destroyForcibly();
 			if (!java.util.Arrays.equals(originalHead,

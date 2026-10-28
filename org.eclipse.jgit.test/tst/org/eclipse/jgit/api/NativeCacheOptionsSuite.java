@@ -29,6 +29,8 @@ import org.junit.runners.Suite;
 		org.eclipse.jgit.util.FsMonitorDaemonClientTest.class,
 		org.eclipse.jgit.util.FsMonitorDaemonTest.class,
 		org.eclipse.jgit.util.FsMonitorFilteredStatusTest.class,
+		org.eclipse.jgit.util.FsMonitorRetainedStatusTest.class,
+		FsMonitorPublicationStatusTest.class,
 		FsMonitorIndexQueryTest.class, FsMonitorInitializationTest.class,
 		FsMonitorCacheTest.class, FsMonitorWriterRefreshTest.class,
 		UntrackedCacheTest.class, UntrackedDirectoryListingTest.class,

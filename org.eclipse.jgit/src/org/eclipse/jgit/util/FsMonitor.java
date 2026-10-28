@@ -199,12 +199,8 @@ public final class FsMonitor {
 			return null;
 		}
 		boolean daemon = isDaemonSetting(hook);
-		Instant now = Instant.now();
-		String boundary = Long.toUnsignedString(now.getEpochSecond()
-				* 1_000_000_000L + now.getNano());
-		State state = new State();
-		state.token = daemon ? "0" : boundary; //$NON-NLS-1$
-		state.version = daemon ? 2 : 1;
+		State state = initialState(daemon);
+		String boundary = state.token;
 		Probe probe = state.query(repository, true, index);
 		int requested = daemon ? 2 : repository.getConfig().getInt("core", null, //$NON-NLS-1$
 				"fsmonitorHookVersion", -1); //$NON-NLS-1$
@@ -213,6 +209,15 @@ public final class FsMonitor {
 		BitSet dirty = new BitSet();
 		dirty.set(0, index.getEntryCount());
 		return new FsMonitorCache(Constants.encode(token), dirty);
+	}
+
+	private static State initialState(boolean daemon) {
+		Instant now = Instant.now();
+		State state = new State();
+		state.token = daemon ? "0" : Long.toUnsignedString(now.getEpochSecond() //$NON-NLS-1$
+				* 1_000_000_000L + now.getNano());
+		state.version = daemon ? 2 : 1;
+		return state;
 	}
 
 	private static String configuredHook(Repository repository) {
@@ -269,9 +274,21 @@ public final class FsMonitor {
 	 * State and worktree scope consumed before an index mutation.
 	 * @param cache refreshed native model, possibly null
 	 * @param paths immutable worktree paths, or null when a full scan is required
+	 * @param publicationPaths notifications after the scan boundary, or null
+	 *        when publication must invalidate all recorded directories
 	 * @since 7.8
 	 */
-	public record IndexRefresh(FsMonitorCache cache, Set<String> paths) {
+	public record IndexRefresh(FsMonitorCache cache, Set<String> paths,
+			Set<String> publicationPaths) {
+		/**
+		 * Create a refresh without a preceding scan boundary.
+		 * @param cache refreshed native model
+		 * @param paths consumed notifications, or null for unknown scope
+		 */
+		public IndexRefresh(FsMonitorCache cache, Set<String> paths) {
+			this(cache, paths, paths);
+		}
+
 		/**
 		 * Create a refresh result with an immutable notification scope.
 		 * @param cache refreshed native model
@@ -279,6 +296,7 @@ public final class FsMonitor {
 		 */
 		public IndexRefresh {
 			paths = paths == null ? null : Set.copyOf(paths);
+			publicationPaths = publicationPaths == null ? null : Set.copyOf(publicationPaths);
 		}
 	}
 
@@ -294,8 +312,29 @@ public final class FsMonitor {
 	 */
 	public static IndexRefresh refreshIndexWithChanges(Repository repository,
 			DirCache index) throws IOException {
+		return refreshIndexWithChanges(repository, index, null);
+	}
+
+	/**
+	 * Refresh a writer from a completed scan's validated monitor boundary.
+	 * Both queries' scopes accompany the index event; only notifications since
+	 * the scan invalidate its newly recorded directories and verified entries.
+	 * A changed index or repository context falls back to conservative refresh.
+	 * @param repository repository whose index is locked
+	 * @param index freshly read index
+	 * @param scan query preceding the completed scan, or null
+	 * @return refreshed model and separate event/publication scopes
+	 * @throws IOException on invalid untracked-cache mutation
+	 * @since 7.8
+	 */
+	public static IndexRefresh refreshIndexWithChanges(Repository repository,
+			DirCache index, Probe scan) throws IOException {
 		FsMonitorCache previous = index.getFsMonitorCache();
-		if (previous == null) {
+		if (scan != null && (repository.isBare() || !scan.matchesIndexPayload(index)
+				|| scan.invalidationScopeUnknown)) {
+			scan = null;
+		}
+		if (previous == null && scan == null) {
 			return new IndexRefresh(initializeIndex(repository, index), null);
 		}
 		String hook = configuredHook(repository);
@@ -306,7 +345,7 @@ public final class FsMonitor {
 		boolean daemon = isDaemonSetting(hook);
 		State state;
 		try {
-			state = storedState(repository, previous);
+			state = previous == null ? new State() : storedState(repository, previous);
 		} catch (CharacterCodingException binaryToken) {
 			// Preserve opaque storage that cannot be passed through Java's
 			// String argv API. Direct status queries require a full check.
@@ -315,50 +354,69 @@ public final class FsMonitor {
 		Instant now = Instant.now();
 		String boundary = Long.toUnsignedString(now.getEpochSecond()
 				* 1_000_000_000L + now.getNano());
-		Probe probe = state.query(repository, true, index);
+		if (scan != null) {
+			state.remember(scan);
+		}
+		Probe probe = state.query(repository, true, index,
+				scan == null ? null : scan.fingerprint);
 		int requested = daemon ? 2 : repository.getConfig().getInt("core", null, //$NON-NLS-1$
 				"fsmonitorHookVersion", -1); //$NON-NLS-1$
 		String token = probe != null ? probe.token
 				: daemon ? "builtin:fake" : requested == 2 ? "" : boundary; //$NON-NLS-1$ //$NON-NLS-2$
 		BitSet dirty = new BitSet();
-		Set<String> paths = new HashSet<>();
+		for (int i = 0; i < index.getEntryCount(); i++) {
+			if (!index.isFsMonitorValid(i)) {
+				dirty.set(i);
+			}
+		}
+		Set<String> late = applyNotifications(repository, index, probe, dirty);
+		Set<String> paths = late;
+		if (scan != null) {
+			Set<String> earlier = applyNotifications(repository, index, scan, dirty);
+			if (paths != null && earlier != null) {
+				paths = new HashSet<>(paths);
+				paths.addAll(earlier);
+			} else {
+				paths = null;
+			}
+		}
+		return new IndexRefresh(new FsMonitorCache(Constants.encode(token), dirty),
+				paths, late);
+	}
+
+	private static Set<String> applyNotifications(Repository repository,
+			DirCache index, Probe probe, BitSet dirty) throws IOException {
 		boolean full = probe == null || probe.invalidationScopeUnknown
 				|| repository.getConfig().getBoolean("core", null, //$NON-NLS-1$
 						"ignoreCase", false); //$NON-NLS-1$
 		if (probe == null || probe.changedPaths.contains("/")) { //$NON-NLS-1$
-			full = true;
 			dirty.set(0, index.getEntryCount());
-		} else {
-			for (int i = 0; i < index.getEntryCount(); i++) {
-				if (!index.isFsMonitorValid(i)) {
-					dirty.set(i);
-				}
+			return null;
+		}
+		Set<String> paths = new HashSet<>();
+		for (String path : probe.changedPaths) {
+			String trimmed = path.endsWith("/") //$NON-NLS-1$
+					? path.substring(0, path.length() - 1) : path;
+			try {
+				SystemReader.getInstance().checkPath(trimmed);
+			} catch (org.eclipse.jgit.errors.CorruptObjectException unsafe) {
+				full = true;
+				continue;
 			}
-			for (String path : probe.changedPaths) {
-				String trimmed = path.endsWith("/") //$NON-NLS-1$
-						? path.substring(0, path.length() - 1) : path;
-				try {
-					SystemReader.getInstance().checkPath(trimmed);
-				} catch (org.eclipse.jgit.errors.CorruptObjectException unsafe) {
-					full = true;
-					continue;
-				}
-				paths.add(trimmed);
-				if (trimmed.equals(".gitignore") //$NON-NLS-1$
-						|| trimmed.endsWith("/.gitignore") //$NON-NLS-1$
-						|| trimmed.equals(".gitattributes") //$NON-NLS-1$
-						|| trimmed.endsWith("/.gitattributes")) { //$NON-NLS-1$
-					full = true;
-				}
-				int matched = invalidateNotification(index, dirty, path);
-				if (matched == 0 && repository.getConfig().getBoolean("core", //$NON-NLS-1$
-						null, "ignoreCase", false)) { //$NON-NLS-1$
-					invalidateCaseNotification(index, dirty, trimmed);
-				}
+			paths.add(trimmed);
+			if (trimmed.equals(".gitignore") //$NON-NLS-1$
+					|| trimmed.endsWith("/.gitignore") //$NON-NLS-1$
+					|| trimmed.equals(".gitattributes") //$NON-NLS-1$
+					|| trimmed.endsWith("/.gitattributes")) { //$NON-NLS-1$
+				full = true;
+			}
+			int matched = invalidateNotification(index, dirty, path);
+			if (matched == 0 && repository.getConfig().getBoolean("core", //$NON-NLS-1$
+					null, "ignoreCase", false)) { //$NON-NLS-1$
+				invalidateCaseNotification(index, dirty, trimmed);
 			}
 		}
-		return new IndexRefresh(new FsMonitorCache(Constants.encode(token), dirty),
-				full ? null : paths);
+		return full ? null : paths;
 	}
 
 	private static State storedState(Repository repository, FsMonitorCache stored)
@@ -429,24 +487,24 @@ public final class FsMonitor {
 	}
 
 	/**
-	 * Validate persisted FSMN for one scan. The disk token is queried each time
-	 * until a later index publication advances it; notifications are not lost
-	 * between ephemeral scans. The opt-in whole-result cache owns its queries.
+	 * Validate persisted FSMN or obtain an initial boundary for one scan. The
+	 * disk token is queried until a later index publication advances it;
+	 * notifications are not lost
+	 * between ephemeral scans. Callers with a whole-result query pass it directly
+	 * to IndexDiff; other scans still query persisted state even if that cache
+	 * option is enabled.
 	 * @param repository repository to scan
 	 * @param index already read index
 	 * @return validation or conservative fallback
 	 * @since 7.8
 	 */
 	public static IndexQuery queryStoredIndex(Repository repository, DirCache index) {
-		if (isEnabled(repository)) {
-			return new IndexQuery(null, false);
-		}
 		return queryIndexForCheckout(repository, index);
 	}
 
 	/**
-	 * Validate persisted state for checkout independently of the status-result
-	 * cache, which cannot authorize checkout of working-tree contents.
+	 * Validate persisted or initial state for checkout independently of the
+	 * status-result cache, which cannot authorize checkout of working-tree contents.
 	 * @param repository repository to query
 	 * @param index already read index
 	 * @return provider query or conservative fallback
@@ -455,18 +513,32 @@ public final class FsMonitor {
 	public static IndexQuery queryIndexForCheckout(Repository repository, DirCache index) {
 		FsMonitorCache stored = index.getFsMonitorCache();
 		String configured = configuredHook(repository);
-		if (stored == null || configured == null
+		if (repository.isBare() || configured == null
 				|| configured.isEmpty() || Boolean.FALSE.equals(
 						UntrackedCacheConfig.parseBoolean(configured))) {
 			return new IndexQuery(null, false);
 		}
 		try {
-			State state = storedState(repository, stored);
+			State state = stored == null ? initialState(isDaemonSetting(configured))
+					: storedState(repository, stored);
 			Probe probe = state.query(repository, true, index);
 			if (probe != null) {
+				if (stored == null && !probe.changedPaths.contains("/")) { //$NON-NLS-1$
+					// No persisted clock can validate old tracked or untracked
+					// metadata. Retain only the boundary for the full scan.
+					Probe initial = new Probe(probe.fingerprint, probe.context, probe.token, false,
+							List.of("/"), probe.hasUntrackedCache, probe.version); //$NON-NLS-1$
+					initial.invalidationScopeUnknown = probe.invalidationScopeUnknown;
+					probe = initial;
+				}
 				probe.indexChecksum = index.getReadIndexChecksum();
-				probe.dirtyEntries = stored.getDirtyEntries();
 				probe.entryCount = index.getEntryCount();
+				if (stored == null) {
+					probe.dirtyEntries = new BitSet();
+					probe.dirtyEntries.set(0, probe.entryCount);
+				} else {
+					probe.dirtyEntries = stored.getDirtyEntries();
+				}
 			}
 			return new IndexQuery(probe, state.requiresFullContentCheck());
 		} catch (Exception invalid) {
@@ -474,9 +546,101 @@ public final class FsMonitor {
 		}
 	}
 
+	/**
+	 * Validate a whole-result cache's query before using it for this scan.
+	 * @param repository repository to scan
+	 * @param index freshly read scan index
+	 * @param scan query preceding this scan
+	 * @return validated query or a full content-check fallback
+	 * @since 7.8
+	 */
+	public static IndexQuery queryForScan(Repository repository, DirCache index, Probe scan) {
+		try {
+			if (scan != null && scan.matchesIndexPayload(index)
+					&& scan.context.equals(contextFingerprint(repository))) {
+				return new IndexQuery(scan, scan.invalidationScopeUnknown);
+			}
+		} catch (Exception invalid) {
+			// Failure to prove the original context requires a complete check.
+		}
+		return new IndexQuery(null, true);
+	}
+
+	/**
+	 * Outcome of an optional scan publication, including notifications arriving
+	 * after the scan boundary. A null probe forbids remembering the old result.
+	 * @since 7.8
+	 */
+	public static final class Publication {
+		private final Probe probe;
+
+		private final Set<String> latePaths;
+
+		private final byte[] indexChecksum;
+
+		private Publication(Probe probe, Set<String> latePaths, byte[] indexChecksum) {
+			this.probe = probe;
+			this.latePaths = latePaths == null ? null : Set.copyOf(latePaths);
+			this.indexChecksum = indexChecksum.clone();
+		}
+
+		/** @return scan probe anchored to the owned write, or null if unproven */
+		public Probe getProbe() {
+			return probe;
+		}
+
+		/** @return immutable late notifications, or null for unknown scope */
+		public Set<String> getLatePaths() {
+			return latePaths;
+		}
+
+		/** @return checksum of the owned publication, excluding its footer */
+		public byte[] getIndexChecksum() {
+			return indexChecksum.clone();
+		}
+	}
+
+	/**
+	 * Correlate a completed result with its own UNTR-only index publication.
+	 * The old scan token is retained: the writer's later token cannot describe
+	 * the already completed result. Context and exact written payload must match.
+	 * @param repository repository containing the published index
+	 * @param scan query preceding the completed scan, possibly null
+	 * @param writtenChecksum payload checksum captured from the owned commit
+	 * @param latePaths notifications consumed after the scan, or null if unknown
+	 * @return publication outcome; an unproven correlation has a null probe
+	 * @since 7.8
+	 */
+	public static Publication finishPublication(Repository repository, Probe scan,
+			byte[] writtenChecksum, Set<String> latePaths) {
+		Probe result = null;
+		try {
+			if (scan != null && !scan.invalidationScopeUnknown
+					&& scan.context.equals(contextFingerprint(repository))) {
+				IndexDigest index = digestIndex(repository.getIndexFile().toPath());
+				if (Arrays.equals(writtenChecksum, index.checksum)
+						&& scan.context.equals(contextFingerprint(repository))) {
+					result = new Probe(fingerprint(index.fingerprint, scan.context),
+							scan.context, scan.token, false, scan.changedPaths, true, scan.version);
+					// This result predates the writer's notifications. Preserve
+					// known late work independently of a later provider reply.
+					result.followupPaths = latePaths == null ? List.of("/") //$NON-NLS-1$
+							: List.copyOf(latePaths);
+				}
+			}
+		} catch (Exception invalid) {
+			// The publication still succeeded; only result reuse is unavailable.
+		}
+		return new Publication(result, latePaths, writtenChecksum);
+	}
+
 	/** Query result; valid means its token may seed a successful full scan. */
 	public static final class Probe {
 		private final String fingerprint;
+
+		private final String context;
+
+		private List<String> followupPaths = List.of();
 
 		private final String token;
 
@@ -496,9 +660,10 @@ public final class FsMonitor {
 
 		private final boolean hasUntrackedCache;
 
-		private Probe(String fingerprint, String token, boolean unchanged,
+		private Probe(String fingerprint, String context, String token, boolean unchanged,
 				List<String> changedPaths, boolean hasUntrackedCache, int version) {
 			this.fingerprint = fingerprint;
+			this.context = context;
 			this.token = token;
 			this.version = version;
 			this.unchanged = unchanged;
@@ -513,9 +678,14 @@ public final class FsMonitor {
 		 * @since 7.8
 		 */
 		public boolean validatesIndex(DirCache index) {
+			return matchesIndexPayload(index) && !changedPaths.contains("/"); //$NON-NLS-1$
+		}
+
+		private boolean matchesIndexPayload(DirCache index) {
+			// A root reply forbids reuse before scanning, but its token still
+			// anchors a completed full scan of this exact index payload.
 			return indexChecksum != null && entryCount == index.getEntryCount()
-					&& Arrays.equals(indexChecksum, index.getReadIndexChecksum())
-					&& !changedPaths.contains("/"); //$NON-NLS-1$
+					&& Arrays.equals(indexChecksum, index.getReadIndexChecksum());
 		}
 
 		/**
@@ -595,6 +765,10 @@ public final class FsMonitor {
 
 		private byte[] indexChecksum;
 
+		private BitSet indexDirtyEntries;
+
+		private int indexEntryCount;
+
 		private boolean supportedIndex;
 
 		private boolean hasUntrackedCache;
@@ -602,6 +776,8 @@ public final class FsMonitor {
 		private FileSnapshot unsupportedIndex;
 
 		private boolean fullContentCheckRequired;
+
+		private List<String> pendingPaths = List.of();
 
 		/**
 		 * Drop correlation after cancellation, failure or external cache
@@ -612,6 +788,9 @@ public final class FsMonitor {
 			boolean checkContents = token != null || fullContentCheckRequired;
 			fingerprint = token = checkedIndex = null;
 			indexChecksum = null;
+			indexDirtyEntries = null;
+			indexEntryCount = 0;
+			pendingPaths = List.of();
 			supportedIndex = false;
 			hasUntrackedCache = false;
 			unsupportedIndex = null;
@@ -632,6 +811,11 @@ public final class FsMonitor {
 
 		private synchronized Probe query(Repository repository, boolean storedQuery,
 				DirCache suppliedIndex) {
+			return query(repository, storedQuery, suppliedIndex, null);
+		}
+
+		private synchronized Probe query(Repository repository, boolean storedQuery,
+				DirCache suppliedIndex, String requiredFingerprint) {
 			// Once correlation is lost, ordinary stat equality is insufficient
 			// until a successful monitored scan establishes a new token.
 			boolean lostCorrelation = token != null || fullContentCheckRequired;
@@ -663,7 +847,7 @@ public final class FsMonitor {
 						executable = new File(repository.getWorkTree(), hook);
 					}
 					if (!daemon && (!executable.isFile() || !executable.canExecute())) {
-						fallback(lostCorrelation);
+						fallback(true);
 						return null;
 					}
 					// A metadata snapshot is sufficient for a negative cache:
@@ -672,7 +856,7 @@ public final class FsMonitor {
 					// data.
 					if (unsupportedIndex != null && !unsupportedIndex
 							.isModified(repository.getIndexFile())) {
-						fullContentCheckRequired = lostCorrelation;
+						fullContentCheckRequired = true;
 						return null;
 					}
 					FileSnapshot indexSnapshot = FileSnapshot
@@ -698,6 +882,13 @@ public final class FsMonitor {
 					if (!storedQuery && !index.equals(checkedIndex)) {
 						DirCache cache = repository.readDirCache();
 						indexChecksum = cache.getReadIndexChecksum();
+						indexEntryCount = cache.getEntryCount();
+						indexDirtyEntries = new BitSet();
+						if (cache.getFsMonitorCache() == null) {
+							indexDirtyEntries.set(0, indexEntryCount);
+						} else {
+							indexDirtyEntries = cache.getFsMonitorCache().getDirtyEntries();
+						}
 						hasUntrackedCache = cache.getUntrackedCache() != null;
 						supportedIndex = true;
 						for (int i = 0; i < cache.getEntryCount(); i++) {
@@ -712,13 +903,18 @@ public final class FsMonitor {
 					if (!supportedIndex) {
 						unsupportedIndex = indexSnapshot;
 						fingerprint = token = null;
-						fullContentCheckRequired = lostCorrelation;
+						fullContentCheckRequired = true;
 						return null;
 					}
 					unsupportedIndex = null;
 					supported = true;
-					String key = fingerprint(repository, index,
+					String context = contextFingerprint(repository,
 							daemon ? null : executable.toPath());
+					String key = fingerprint(index, context);
+					if (requiredFingerprint != null && !requiredFingerprint.equals(key)) {
+						fallback(true);
+						return null;
+					}
 					if (storedQuery && Arrays.equals(expectedChecksum, indexChecksum)) {
 						// The configured provider validates this persisted token;
 						// no process-local Status result is implied by this anchor.
@@ -783,6 +979,10 @@ public final class FsMonitor {
 							scopeUnknown = true;
 						}
 					}
+					if (!pendingPaths.isEmpty()) {
+						changedPaths.addAll(pendingPaths);
+						noChanges = false;
+					}
 					// External index/ref/config changes during the hook
 					// invalidate reuse.
 					if (!key.equals(fingerprint(repository,
@@ -813,9 +1013,14 @@ public final class FsMonitor {
 					}
 					trace.data("cache/hit", //$NON-NLS-1$
 							Boolean.toString(noChanges && sameContext));
-					Probe result = new Probe(key, records[0], noChanges && sameContext,
+					Probe result = new Probe(key, context, records[0], noChanges && sameContext,
 							changedPaths, hasUntrackedCache, queryVersion);
 					result.invalidationScopeUnknown = scopeUnknown;
+					if (!storedQuery) {
+						result.indexChecksum = indexChecksum;
+						result.entryCount = indexEntryCount;
+						result.dirtyEntries = indexDirtyEntries;
+					}
 					return result;
 				} catch (Exception failure) {
 					if (failure instanceof InterruptedException) {
@@ -823,7 +1028,7 @@ public final class FsMonitor {
 					}
 					trace.data("query/failed", //$NON-NLS-1$
 							failure.getClass().getSimpleName());
-					fallback(supported || lostCorrelation);
+					fallback(supported || lostCorrelation || isConfigured(repository));
 					return null;
 				}
 			}
@@ -851,12 +1056,13 @@ public final class FsMonitor {
 		 */
 		public synchronized void remember(Probe probe) {
 			if (probe == null) {
-				fingerprint = token = null;
+				clear();
 				return;
 			}
 			fingerprint = probe.fingerprint;
 			token = probe.token;
 			version = probe.version;
+			pendingPaths = probe.followupPaths;
 		}
 	}
 
@@ -904,8 +1110,30 @@ public final class FsMonitor {
 
 	private static String fingerprint(Repository repo, String index,
 			Path executable) throws Exception {
+		return fingerprint(index, contextFingerprint(repo, executable));
+	}
+
+	private static String fingerprint(String index, String context) throws Exception {
 		MessageDigest md = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
 		update(md, index);
+		update(md, context);
+		return HexFormat.of().formatHex(md.digest());
+	}
+
+	private static String contextFingerprint(Repository repo) throws Exception {
+		String configured = configuredHook(repo);
+		if (!isConfigured(repo)) {
+			return null;
+		}
+		File executable = new File(configured);
+		if (!executable.isAbsolute()) {
+			executable = new File(repo.getWorkTree(), configured);
+		}
+		return contextFingerprint(repo, isDaemonSetting(configured) ? null : executable.toPath());
+	}
+
+	private static String contextFingerprint(Repository repo, Path executable) throws Exception {
+		MessageDigest md = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
 		update(md, repo.getDirectory().getAbsolutePath());
 		update(md, repo.getWorkTree().getAbsolutePath());
 		update(md, repo.getIndexFile().getAbsolutePath());

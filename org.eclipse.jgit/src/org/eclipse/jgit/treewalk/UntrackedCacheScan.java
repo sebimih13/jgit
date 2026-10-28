@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.jgit.dircache.DirCache;
+import org.eclipse.jgit.events.IndexChangedEvent;
 import org.eclipse.jgit.internal.storage.file.UntrackedCache;
 import org.eclipse.jgit.internal.storage.file.UntrackedCache.Directory;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
@@ -61,6 +62,12 @@ final class UntrackedCacheScan {
 	private final Set<String> directoryEntries = new HashSet<>();
 
 	private boolean failed;
+
+	private FsMonitor.Publication publication;
+
+	FsMonitor.Publication getPublication() {
+		return publication;
+	}
 
 	static UntrackedCacheScan create(Repository repository) {
 		try {
@@ -254,7 +261,9 @@ final class UntrackedCacheScan {
 	}
 
 	boolean publish(DirCache scanned, Set<String> untracked,
-			Set<String> verified, ProgressMonitor monitor) {
+			Set<String> verified, ProgressMonitor monitor, FsMonitor.Probe scan,
+			Object operationToken) {
+		publication = null;
 		try {
 			if (monitor != null && monitor.isCancelled())
 				return false;
@@ -266,7 +275,14 @@ final class UntrackedCacheScan {
 					&& scanned.getUntrackedCache() != null && Arrays.equals(
 							payload, scanned.getUntrackedCache().write()))
 				return false;
-			DirCache locked = repository.lockDirCache();
+			byte[][] written = { scanned.getReadIndexChecksum() };
+			DirCache locked = DirCache.lock(repository, event -> {
+				// Capture the owned checksum before any listener can write again.
+				written[0] = event.getIndexChecksum();
+				repository.notifyIndexChanged(operationToken == null ? event
+						: new IndexChangedEvent(event.isInternal(), event.getFsMonitorPaths(),
+								event.getIndexChecksum(), operationToken));
+			}, scan);
 			try {
 				if (!eligible(repository)
 						|| monitor != null && monitor.isCancelled()
@@ -278,7 +294,12 @@ final class UntrackedCacheScan {
 					return false;
 				locked.setUntrackedCacheAfterScan(cache, verified);
 				locked.write();
-				return locked.commit();
+				Set<String> late = locked.getFsMonitorPublicationPaths();
+				if (!locked.commit()) {
+					return false;
+				}
+				publication = FsMonitor.finishPublication(repository, scan, written[0], late);
+				return true;
 			} finally {
 				locked.unlock();
 			}

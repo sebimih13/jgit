@@ -132,6 +132,76 @@ public class FsMonitorCheckoutTest extends RepositoryTestCase {
 		checkConflict("reported", true);
 	}
 
+	@Test
+	public void assumedEntryCannotHideCheckoutConflictWithReportedMonitor()
+			throws Exception {
+		checkFlag("--assume-unchanged", "reported", false);
+	}
+
+	@Test
+	public void assumedEntryCannotHideCheckoutConflictWithDisabledMonitor()
+			throws Exception {
+		checkFlag("--assume-unchanged", "disabled", false);
+	}
+
+	@Test
+	public void assumedEntryCannotHideCheckoutConflictWithFailureMonitor()
+			throws Exception {
+		checkFlag("--assume-unchanged", "failure", false);
+	}
+
+	@Test
+	public void cleanAssumedEntryCanBeCheckedOut() throws Exception {
+		checkFlag("--assume-unchanged", "reported", true);
+	}
+
+	@Test
+	public void skippedEntryCannotHideCheckoutConflictWithReportedMonitor()
+			throws Exception {
+		checkFlag("--skip-worktree", "reported", false);
+	}
+
+	@Test
+	public void skippedEntryCannotHideCheckoutConflictWithDisabledMonitor()
+			throws Exception {
+		checkFlag("--skip-worktree", "disabled", false);
+	}
+
+	@Test
+	public void skippedEntryCannotHideCheckoutConflictWithFailureMonitor()
+			throws Exception {
+		checkFlag("--skip-worktree", "failure", false);
+	}
+
+	@Test
+	public void cleanSkippedEntryCanBeCheckedOut() throws Exception {
+		checkFlag("--skip-worktree", "reported", true);
+	}
+
+	private void checkFlag(String flag, String mode, boolean clean)
+			throws Exception {
+		var scenario = NativeFsMonitorCheckoutSupport.prepare(db, mode,
+				false, flag, clean);
+		try (Git git = Git.wrap(db)) {
+			// Status honors these flags; checkout must independently verify
+			// paths it will overwrite, as native t2106 requires.
+			assertEquals(java.util.Set.of(), git.status()
+					.setReportIgnored(false).call().getModified());
+			if (clean) {
+				git.checkout().setName(scenario.target().name()).call();
+				assertEquals(scenario.target(), db.resolve(Constants.HEAD));
+				assertEquals("dest\n", Files.readString(scenario.file()));
+			} else {
+				assertThrows(CheckoutConflictException.class, () -> git.checkout()
+						.setName(scenario.target().name()).call());
+				assertEquals("edit\n", Files.readString(scenario.file()));
+				assertEquals(scenario.base(), db.resolve(Constants.HEAD));
+				assertArrayEquals(scenario.originalIndex(),
+						Files.readAllBytes(db.getIndexFile().toPath()));
+			}
+		}
+	}
+
 	private void checkConflict(String mode, boolean resultCache)
 			throws Exception {
 		var scenario = NativeFsMonitorCheckoutSupport.prepare(db, mode,

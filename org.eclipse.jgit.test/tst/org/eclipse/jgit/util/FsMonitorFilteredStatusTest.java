@@ -32,6 +32,40 @@ import org.junit.Test;
 
 /** Native pathspec selection applied before monitor metadata preparation. */
 public class FsMonitorFilteredStatusTest extends RepositoryTestCase {
+	@Test
+	public void wholeResultCacheOptionDoesNotBypassFilteredStatusValidation() throws Exception {
+		checkWholeResultOption(true);
+	}
+
+	@Test
+	public void wholeResultCacheOptionDoesNotBypassStandaloneIndexDiffValidation() throws Exception {
+		checkWholeResultOption(false);
+	}
+
+	private void checkWholeResultOption(boolean statusCommand) throws Exception {
+		prepare();
+		db.getConfig().setBoolean("jgit", null, "fsmonitorCache", true);
+		db.getConfig().save();
+		byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
+		var path = db.getWorkTree().toPath().resolve("a");
+		var time = Files.getLastModifiedTime(path);
+		Files.writeString(path, "next\n");
+		Files.setLastModifiedTime(path, time);
+		NativeFsMonitorIndexSupport.report(db, "a");
+		if (statusCommand) {
+			try (var git = Git.wrap(db)) {
+				assertEquals(Set.of("a"), git.status().addPath("a").call().getModified());
+			}
+		} else {
+			var diff = new IndexDiff(db, Constants.HEAD, new FileTreeIterator(db));
+			diff.setFilter(PathFilterGroup.createFromStrings("a"));
+			diff.diff();
+			assertEquals(Set.of("a"), diff.getModified());
+		}
+		NativeFsMonitorWorkloadSupport.assertNativeDiff(db, false, null, Set.of("a"));
+		assertArrayEquals(original, Files.readAllBytes(db.getIndexFile().toPath()));
+	}
+
 	private static final Set<String> ALL = Set.of("a", "m", "z", "sub/file",
 			"sub/new\nline", "sub-neighbor/file");
 

@@ -22,6 +22,8 @@ public class IndexChangedEvent extends RepositoryEvent<IndexChangedListener> {
 
 	private final byte[] indexChecksum;
 
+	private final Object operationToken;
+
 	/**
 	 * Notify that the index changed
 	 *
@@ -55,10 +57,35 @@ public class IndexChangedEvent extends RepositoryEvent<IndexChangedListener> {
 	 */
 	public IndexChangedEvent(boolean internal, Set<String> fsMonitorPaths,
 			byte[] indexChecksum) {
+		this(internal, fsMonitorPaths, indexChecksum, null);
+	}
+
+	/**
+	 * Notify an index change attributable to one operation.
+	 * @param internal whether this process wrote the index
+	 * @param fsMonitorPaths consumed paths, or null for unknown scope
+	 * @param indexChecksum computed payload checksum, or null if unavailable
+	 * @param operationToken opaque identity of the producing operation, or null
+	 * @since 7.8
+	 */
+	public IndexChangedEvent(boolean internal, Set<String> fsMonitorPaths,
+			byte[] indexChecksum, Object operationToken) {
+		this.operationToken = operationToken;
 		this.indexChecksum = indexChecksum == null ? null : indexChecksum.clone();
 		this.internal = internal;
 		this.fsMonitorPaths = fsMonitorPaths == null ? null
 				: Set.copyOf(fsMonitorPaths);
+	}
+
+	/**
+	 * Get the opaque identity supplied by the operation that wrote the index.
+	 * Forwarders must preserve this identity. It does not replace checksum or
+	 * notification-scope validation for other consumers.
+	 * @return operation identity, or null for ordinary/external events
+	 * @since 7.8
+	 */
+	public Object getOperationToken() {
+		return operationToken;
 	}
 
 	/**

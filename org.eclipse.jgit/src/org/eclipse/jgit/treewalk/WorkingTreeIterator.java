@@ -1014,6 +1014,19 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 	 */
 	public boolean isModifiedForCheckout(DirCacheEntry entry, ObjectReader reader)
 			throws IOException {
+		if (entry != null && (entry.isAssumeValid() || entry.isSkipWorkTree())
+				&& entry.getFileMode() != FileMode.GITLINK) {
+			if (isModeDifferent(entry.getRawMode())) {
+				return true;
+			}
+			// unpack-trees.c:verify_uptodate_1 ignores these flags before
+			// overwriting a path. Bypass the index-ID shortcut as well: it
+			// can already have cached the assumed-clean object's ID.
+			contentIdOffset = 0;
+			contentIdFromPtr = ptr;
+			contentId = idBufferBlob(entries[ptr]);
+			return contentCheck(entry, reader);
+		}
 		boolean trusted = state.fsMonitorValidEntries.contains(entry)
 				&& !state.forceContentCheckEntries.contains(entry);
 		return isModified(entry, !trusted, reader);

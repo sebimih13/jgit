@@ -238,6 +238,43 @@ public class IndexDiff {
 
 	private ProgressMonitor scanMonitor;
 
+	private FsMonitor.Probe scanProbe;
+
+	private FsMonitor.Probe suppliedProbe;
+
+	private FsMonitor.Publication publication;
+
+	private Set<DirCacheEntry> contentCheckEntries = Collections.emptySet();
+
+	/**
+	 * Supply the whole-result cache query preceding this scan. Its index and
+	 * repository context are validated again before any cached metadata is used.
+	 * @param probe query preceding the scan, or null for ordinary index validation
+	 * @since 7.8
+	 */
+	public void setFsMonitorProbe(FsMonitor.Probe probe) {
+		suppliedProbe = probe;
+	}
+
+	/**
+	 * Get the query associated with the completed scan, adjusted only for an
+	 * owned optional publication. A null result forbids remembering correlation.
+	 * @return completed scan boundary, or null
+	 * @since 7.8
+	 */
+	public FsMonitor.Probe getFsMonitorProbe() {
+		return scanProbe;
+	}
+
+	/**
+	 * Get the outcome of the last committed optional index publication.
+	 * @return publication outcome, or null if none was committed
+	 * @since 7.8
+	 */
+	public FsMonitor.Publication getFsMonitorPublication() {
+		return publication;
+	}
+
 	/**
 	 * Publish recorded all-mode traversal data after a complete, uncancelled scan. A normal
 	 * working-tree iterator does not record inputs and leaves the index intact.
@@ -245,6 +282,17 @@ public class IndexDiff {
 	 * @since 7.8
 	 */
 	public boolean updateUntrackedCache() {
+		return updateUntrackedCache(null);
+	}
+
+	/**
+	 * Publish recorded traversal data, attaching an opaque identity to its index
+	 * event so its own cache can distinguish this write from other writers.
+	 * @param operationToken operation identity, or null
+	 * @return whether the optional update was committed
+	 * @since 7.8
+	 */
+	public boolean updateUntrackedCache(Object operationToken) {
 		if (!completeScan || filter != null || reportIgnored
 				|| initialWorkingTreeIterator.getClass() != FileTreeIterator.class) {
 			return false;
@@ -256,14 +304,21 @@ public class IndexDiff {
 				String path = entry.getPathString();
 				if (entry.getStage() == 0 && !entry.isAssumeValid()
 						&& !entry.isSkipWorkTree() && entry.getFileMode() != FileMode.GITLINK
-						&& !dirCache.isFsMonitorValid(i) && !modified.contains(path)
+						&& (!dirCache.isFsMonitorValid(i) || contentCheckEntries.contains(entry))
+						&& !modified.contains(path)
 						&& !missing.contains(path) && !conflicts.containsKey(path)) {
 					verified.add(path);
 				}
 			}
 		}
-		return ((FileTreeIterator) initialWorkingTreeIterator)
-				.updateUntrackedCache(dirCache, untracked, verified, scanMonitor);
+		FileTreeIterator iterator = (FileTreeIterator) initialWorkingTreeIterator;
+		if (!iterator.updateUntrackedCache(dirCache, untracked, verified, scanMonitor,
+				scanProbe, operationToken)) {
+			return false;
+		}
+		publication = iterator.getFsMonitorPublication();
+		scanProbe = publication == null ? null : publication.getProbe();
+		return true;
 	}
 
 	/**
@@ -600,15 +655,18 @@ public class IndexDiff {
 			int estIndexSize, String title, RepositoryBuilderFactory factory)
 			throws IOException {
 		completeScan = false;
+		publication = null;
 		scanMonitor = monitor;
 		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
 				"index", "read")) { //$NON-NLS-1$ //$NON-NLS-2$
 			dirCache = repository.readDirCache();
 			FsMonitor.IndexQuery query = initialWorkingTreeIterator.getClass() == FileTreeIterator.class
-					? FsMonitor.queryStoredIndex(repository, dirCache)
+					? suppliedProbe == null ? FsMonitor.queryStoredIndex(repository, dirCache)
+							: FsMonitor.queryForScan(repository, dirCache, suppliedProbe)
 					: new FsMonitor.IndexQuery(null, false);
 			query.invalidateUntrackedCache(repository, dirCache);
 			FsMonitor.Probe probe = query.probe();
+			scanProbe = probe;
 			if (query.forceContentCheck()) {
 				forceContentCheckPaths = List.of("/"); //$NON-NLS-1$
 			} else if (probe != null) {
@@ -618,6 +676,7 @@ public class IndexDiff {
 			}
 			BitSet selected = IndexEntrySelection.select(dirCache, filter, monitor);
 			Set<DirCacheEntry> forced = configureContentChecks(selected);
+			contentCheckEntries = forced;
 			Set<DirCacheEntry> trusted = probe != null
 					? probe.getIndexValidEntries(dirCache, selected) : new HashSet<>();
 			trusted.removeAll(forced);

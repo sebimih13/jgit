@@ -64,6 +64,8 @@ public class StatusCommand extends GitCommand<Status> {
 
 	private boolean updateUntrackedCache;
 
+	private FsMonitor.Probe completedProbe;
+
 	/**
 	 * Enable best-effort native UNTR publication after a complete scan.
 	 * The default is read-only. Publication requires ignored reporting disabled,
@@ -196,10 +198,12 @@ public class StatusCommand extends GitCommand<Status> {
 				FsMonitor.Probe probe = cache.monitor.query(repo);
 				Status previous = cache.result.get();
 				if (probe != null && probe.isUnchanged() && previous != null) {
+					FsMonitor.Probe resultProbe = probe;
 					if (!FsMonitor.isUntrackedCacheEnabled(repo, probe)) {
 						try {
 							Status untracked = scanStatus(probe, false, true);
 							previous = new Status(previous, untracked);
+							resultProbe = completedProbe;
 							cache.result = new WeakReference<>(previous);
 						} catch (GitAPIException | RuntimeException | Error failure) {
 							cache.result.clear();
@@ -207,15 +211,18 @@ public class StatusCommand extends GitCommand<Status> {
 							throw failure;
 						}
 					}
-					cache.monitor.remember(probe);
+					cache.monitor.remember(resultProbe);
+					if (resultProbe == null) {
+						cache.result.clear();
+					}
 					return previous;
 				}
 				cache.result.clear();
 				try {
 					Status result = scanStatus(probe, cache.monitor.requiresFullContentCheck()
-							|| probe != null && previous == null);
-					cache.monitor.remember(probe);
-					if (probe != null) {
+							|| probe != null && previous == null, false, previous);
+					cache.monitor.remember(completedProbe);
+					if (completedProbe != null) {
 						cache.result = new WeakReference<>(result);
 					}
 					return result;
@@ -238,6 +245,12 @@ public class StatusCommand extends GitCommand<Status> {
 
 	private Status scanStatus(FsMonitor.Probe probe, boolean forceContentCheck,
 			boolean untrackedOnly) throws GitAPIException, NoWorkTreeException {
+		return scanStatus(probe, forceContentCheck, untrackedOnly, null);
+	}
+
+	private Status scanStatus(FsMonitor.Probe probe, boolean forceContentCheck,
+			boolean untrackedOnly, Status previous)
+			throws GitAPIException, NoWorkTreeException {
 		if (workingTreeIt == null) {
 			workingTreeIt = updateUntrackedCache && !reportIgnored && paths == null
 					&& ignoreSubmoduleMode == null && !untrackedOnly
@@ -246,6 +259,7 @@ public class StatusCommand extends GitCommand<Status> {
 
 		try {
 			IndexDiff diff = new IndexDiff(repo, Constants.HEAD, workingTreeIt);
+			diff.setFsMonitorProbe(probe);
 			diff.setReportIgnored(reportIgnored);
 			if (untrackedOnly) {
 				diff.setFilter(new org.eclipse.jgit.treewalk.filter.TreeFilter() {
@@ -264,7 +278,14 @@ public class StatusCommand extends GitCommand<Status> {
 			if (forceContentCheck) {
 				diff.setForceContentCheckPaths(java.util.List.of("/")); //$NON-NLS-1$
 			} else if (probe != null) {
-				diff.setForceContentCheckPaths(probe.getChangedPaths());
+				List<String> checkPaths = new ArrayList<>(probe.getChangedPaths());
+				if (previous != null && !untrackedOnly) {
+					// Advancing the provider clock does not make an earlier dirty
+					// entry clean. Its index stat may still match a same-size edit.
+					checkPaths.addAll(previous.getModified());
+					checkPaths.addAll(previous.getMissing());
+				}
+				diff.setForceContentCheckPaths(checkPaths);
 			}
 			if (ignoreSubmoduleMode != null)
 				diff.setIgnoreSubmoduleMode(ignoreSubmoduleMode);
@@ -278,6 +299,7 @@ public class StatusCommand extends GitCommand<Status> {
 			if (updateUntrackedCache) {
 				diff.updateUntrackedCache();
 			}
+			completedProbe = diff.getFsMonitorProbe();
 			return new Status(diff);
 		} catch (IOException e) {
 			throw new JGitInternalException(e.getMessage(), e);

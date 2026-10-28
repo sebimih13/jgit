@@ -35,6 +35,7 @@ import org.eclipse.jgit.lib.ProgressMonitor;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
 import org.eclipse.jgit.util.FS;
+import org.eclipse.jgit.util.FsMonitor;
 import org.eclipse.jgit.util.FS_POSIX;
 
 /**
@@ -368,7 +369,49 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 */
 	public boolean updateUntrackedCache(DirCache index, Set<String> untracked,
 			Set<String> verified, ProgressMonitor monitor) {
-		return untrackedScan != null && untrackedScan.publish(index, untracked, verified, monitor);
+		return updateUntrackedCache(index, untracked, verified, monitor, null);
+	}
+
+	/**
+	 * Publish a complete scan using its operation-local monitor boundary.
+	 * @param index index used by the scan
+	 * @param untracked complete untracked path set
+	 * @param verified clean tracked paths verified by the scan
+	 * @param monitor cancellation monitor, or null
+	 * @param scan monitor query preceding the scan, or null
+	 * @return whether an updated index was committed
+	 * @since 7.8
+	 */
+	public boolean updateUntrackedCache(DirCache index, Set<String> untracked,
+			Set<String> verified, ProgressMonitor monitor, FsMonitor.Probe scan) {
+		return updateUntrackedCache(index, untracked, verified, monitor, scan, null);
+	}
+
+	/**
+	 * Publish a scan, tagging only this operation's index event.
+	 * @param index index used by the scan
+	 * @param untracked complete untracked path set
+	 * @param verified clean tracked paths verified by the scan
+	 * @param monitor cancellation monitor, or null
+	 * @param scan query preceding the scan, or null
+	 * @param operationToken opaque event identity, or null
+	 * @return whether the optional index update was committed
+	 * @since 7.8
+	 */
+	public boolean updateUntrackedCache(DirCache index, Set<String> untracked,
+			Set<String> verified, ProgressMonitor monitor, FsMonitor.Probe scan,
+			Object operationToken) {
+		return untrackedScan != null && untrackedScan.publish(index, untracked, verified,
+				monitor, scan, operationToken);
+	}
+
+	/**
+	 * Get correlation and late notifications from the last committed publication.
+	 * @return outcome, or null if no optional update was committed
+	 * @since 7.8
+	 */
+	public FsMonitor.Publication getFsMonitorPublication() {
+		return untrackedScan == null ? null : untrackedScan.getPublication();
 	}
 
 	/**
