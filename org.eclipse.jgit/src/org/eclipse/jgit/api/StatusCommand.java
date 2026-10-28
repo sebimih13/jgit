@@ -66,6 +66,8 @@ public class StatusCommand extends GitCommand<Status> {
 
 	private FsMonitor.Probe completedProbe;
 
+	private FsMonitor.IndexQuery monitorQuery;
+
 	/**
 	 * Enable best-effort native UNTR publication after a complete scan.
 	 * The default is read-only. Publication requires ignored reporting disabled,
@@ -196,6 +198,8 @@ public class StatusCommand extends GitCommand<Status> {
 			}
 			synchronized (cache) {
 				FsMonitor.Probe probe = cache.monitor.query(repo);
+				monitorQuery = new FsMonitor.IndexQuery(probe,
+						cache.monitor.requiresFullContentCheck());
 				Status previous = cache.result.get();
 				if (probe != null && probe.isUnchanged() && previous != null) {
 					FsMonitor.Probe resultProbe = probe;
@@ -259,7 +263,7 @@ public class StatusCommand extends GitCommand<Status> {
 
 		try {
 			IndexDiff diff = new IndexDiff(repo, Constants.HEAD, workingTreeIt);
-			diff.setFsMonitorProbe(probe);
+			diff.setFsMonitorQuery(monitorQuery);
 			diff.setReportIgnored(reportIgnored);
 			if (untrackedOnly) {
 				diff.setFilter(new org.eclipse.jgit.treewalk.filter.TreeFilter() {

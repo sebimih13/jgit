@@ -240,7 +240,7 @@ public class IndexDiff {
 
 	private FsMonitor.Probe scanProbe;
 
-	private FsMonitor.Probe suppliedProbe;
+	private FsMonitor.IndexQuery suppliedQuery;
 
 	private FsMonitor.Publication publication;
 
@@ -253,7 +253,17 @@ public class IndexDiff {
 	 * @since 7.8
 	 */
 	public void setFsMonitorProbe(FsMonitor.Probe probe) {
-		suppliedProbe = probe;
+		suppliedQuery = probe == null ? null : new FsMonitor.IndexQuery(probe, false);
+	}
+
+	/**
+	 * Supply an attempted whole-result query, including failure. A failed query
+	 * must not be repeated by this scan or seed reuse after a context race.
+	 * @param query attempted query, or null for ordinary persisted validation
+	 * @since 7.8
+	 */
+	public void setFsMonitorQuery(FsMonitor.IndexQuery query) {
+		suppliedQuery = query;
 	}
 
 	/**
@@ -660,10 +670,19 @@ public class IndexDiff {
 		try (Trace2.Scope trace = Trace2.getInstance().region(repository,
 				"index", "read")) { //$NON-NLS-1$ //$NON-NLS-2$
 			dirCache = repository.readDirCache();
-			FsMonitor.IndexQuery query = initialWorkingTreeIterator.getClass() == FileTreeIterator.class
-					? suppliedProbe == null ? FsMonitor.queryStoredIndex(repository, dirCache)
-							: FsMonitor.queryForScan(repository, dirCache, suppliedProbe)
-					: new FsMonitor.IndexQuery(null, false);
+			FsMonitor.IndexQuery query = new FsMonitor.IndexQuery(null, false);
+			if (initialWorkingTreeIterator.getClass() == FileTreeIterator.class) {
+				if (suppliedQuery == null) {
+					query = FsMonitor.queryStoredIndex(repository, dirCache);
+				} else if (suppliedQuery.probe() == null) {
+					query = suppliedQuery;
+				} else {
+					FsMonitor.IndexQuery validated = FsMonitor.queryForScan(repository,
+							dirCache, suppliedQuery.probe());
+					query = new FsMonitor.IndexQuery(validated.probe(),
+							validated.forceContentCheck() || suppliedQuery.forceContentCheck());
+				}
+			}
 			query.invalidateUntrackedCache(repository, dirCache);
 			FsMonitor.Probe probe = query.probe();
 			scanProbe = probe;
