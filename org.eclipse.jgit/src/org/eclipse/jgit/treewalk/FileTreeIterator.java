@@ -94,7 +94,7 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	}
 
 	/**
-	 * Create a walk optionally recording native all-mode cache inputs.
+	 * Create a walk optionally recording native cache-maintenance inputs.
 	 * Recording alone does not write the index.
 	 * @param repo repository to scan
 	 * @param recordUntrackedCache whether to capture a complete traversal
@@ -312,12 +312,30 @@ public class FileTreeIterator extends WorkingTreeIterator {
 
 	@Override
 	public void setFsMonitorValidEntries(Collection<DirCacheEntry> entries) {
-		monitorEntries = Set.copyOf(entries);
+		monitorEntries = snapshotMonitorEntries(entries);
 		super.setFsMonitorValidEntries(monitorEntries);
 		monitorMetadata = !entries.isEmpty() && getClass() == FileTreeIterator.class
 				&& fs.getClass() == FS_POSIX.class && getRepository() != null
 				? IndexPreloader.fromMonitor(getRepository(), fs, entries) : null;
 		preloaded = monitorMetadata;
+	}
+
+	private static Set<DirCacheEntry> snapshotMonitorEntries(
+			Collection<DirCacheEntry> entries) {
+		if (entries instanceof Set<?>) {
+			DirCacheEntry[] snapshot = entries.toArray(new DirCacheEntry[0]);
+			for (DirCacheEntry entry : snapshot) {
+				if (entry.getClass() != DirCacheEntry.class) {
+					// Subclasses may define value equality, including in an
+					// identity-based Set. Preserve general copy/dedup semantics.
+					return Set.copyOf(entries);
+				}
+			}
+			// Canonical entries use identity equality and are already unique.
+			// Take an immutable copy without a temporary deduplicating HashSet.
+			return Set.of(snapshot);
+		}
+		return Set.copyOf(entries);
 	}
 
 	/**
@@ -339,6 +357,9 @@ public class FileTreeIterator extends WorkingTreeIterator {
 	 * @since 7.8
 	 */
 	public void setUntrackedCache(DirCache index, boolean reportIgnored) {
+		if (untrackedScan != null && !untrackedScan.acceptsIndex(index)) {
+			untrackedScan = null;
+		}
 		untrackedListing = getClass() == FileTreeIterator.class
 				? UntrackedDirectoryListing.create(getRepository(), index, reportIgnored) : null;
 	}

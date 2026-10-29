@@ -390,6 +390,9 @@ public class DirCache {
 	/** index checksum when index was written to disk */
 	private byte[] writeIndexChecksum;
 
+	/** Complete-scan publication needs an owned payload identity even with a zero footer. */
+	private boolean checksumForPublication;
+
 	/** listener to be informed on commit */
 	private IndexChangedListener indexChangedListener;
 
@@ -488,6 +491,7 @@ public class DirCache {
 	 */
 	public void setUntrackedCacheAfterScan(UntrackedCache cache, Set<String> verified) throws IOException {
 		requireLocked(myLock);
+		checksumForPublication = true;
 		if (repository == null) {
 			throw new IllegalStateException("Repository-aware index lock required"); //$NON-NLS-1$
 		}
@@ -709,6 +713,7 @@ public class DirCache {
 		fsMonitorCacheExplicit = false;
 		untrackedCacheExplicit = false;
 		untrackedCacheIndexState = null;
+		checksumForPublication = false;
 		snapshot = null;
 		sortedEntries = NO_ENTRIES;
 		entryCnt = 0;
@@ -940,7 +945,8 @@ public class DirCache {
 
 	void writeTo(File dir, OutputStream os) throws IOException {
 		readConfig();
-		MessageDigest foot = newMessageDigest();
+		MessageDigest foot = checksumForPublication ? Constants.newMessageDigest()
+				: newMessageDigest();
 		DigestOutputStream dos = new DigestOutputStream(os, foot);
 		if (version == null
 				|| version == DirCacheVersion.DIRC_VERSION_MINIMUM
@@ -1025,8 +1031,10 @@ public class DirCache {
 			dos.write(raw);
 		}
 		writeIndexChecksum = foot.digest();
-		os.write(writeIndexChecksum);
+		os.write(skipHash && checksumForPublication
+				? new byte[Constants.OBJECT_ID_LENGTH] : writeIndexChecksum);
 		os.close();
+		checksumForPublication = false;
 	}
 
 	private void initializeFsMonitor() {

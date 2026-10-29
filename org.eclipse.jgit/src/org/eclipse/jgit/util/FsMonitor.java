@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.HexFormat;
 import java.util.List;
@@ -174,8 +175,15 @@ public final class FsMonitor {
 				return;
 			}
 			for (String path : probe.changedPaths) {
-				cache.invalidateWorkingTreePath(Constants.encode(path.endsWith("/") //$NON-NLS-1$
-						? path.substring(0, path.length() - 1) : path));
+				try {
+					cache.invalidateWorkingTreePath(Constants.encode(path.endsWith("/") //$NON-NLS-1$
+							? path.substring(0, path.length() - 1) : path));
+				} catch (IOException noncanonical) {
+					// Provider paths cannot make an optional cache abort status.
+					// Content selection already treats unknown bounds as a full check.
+					cache.invalidateAll();
+					return;
+				}
 			}
 		}
 	}
@@ -387,8 +395,9 @@ public final class FsMonitor {
 	private static Set<String> applyNotifications(Repository repository,
 			DirCache index, Probe probe, BitSet dirty) throws IOException {
 		boolean full = probe == null || probe.invalidationScopeUnknown
-				|| repository.getConfig().getBoolean("core", null, //$NON-NLS-1$
-						"ignoreCase", false); //$NON-NLS-1$
+				|| !probe.changedPaths.isEmpty()
+						&& repository.getConfig().getBoolean("core", null, //$NON-NLS-1$
+								"ignoreCase", false); //$NON-NLS-1$
 		if (probe == null || probe.changedPaths.contains("/")) { //$NON-NLS-1$
 			dirty.set(0, index.getEntryCount());
 			return null;
@@ -722,8 +731,15 @@ public final class FsMonitor {
 		 * @since 7.8
 		 */
 		public Set<DirCacheEntry> getIndexValidEntries(DirCache index, BitSet selected) {
-			Set<DirCacheEntry> result = new HashSet<>();
-			if (validatesIndex(index)) {
+			boolean valid = validatesIndex(index);
+			int candidates = valid ? index.getEntryCount() : 0;
+			if (valid && selected != null) {
+				candidates = Math.min(candidates, selected.cardinality());
+			}
+			int capacity = (int) Math.min(1L << 30, (4L * candidates + 2) / 3);
+			// Keep the index's path order for directory-local metadata capture.
+			Set<DirCacheEntry> result = new LinkedHashSet<>(capacity);
+			if (valid) {
 				for (int i = selected == null ? 0 : selected.nextSetBit(0);
 						i >= 0 && i < index.getEntryCount();
 						i = selected == null ? i + 1 : selected.nextSetBit(i + 1)) {

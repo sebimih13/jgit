@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -34,13 +35,18 @@ import org.eclipse.jgit.util.FsMonitor;
 import org.eclipse.jgit.util.SystemReader;
 
 /**
- * Capture complete all-mode traversal before optional, checksum-guarded
- * publication.
+ * Capture complete API traversal before optional, checksum-guarded publication
+ * in the configured native untracked mode.
  */
 final class UntrackedCacheScan {
 	private record Ignore(Path path, int[] stat, ObjectId raw,
-			ObjectId nativeId) {
+			ObjectId nativeId, boolean directoryBoundAbsence) {
 		boolean unchanged() throws IOException {
+			// Per-directory absence is protected by the surrounding
+			// before/after
+			// and pre-publication directory stat checks. Global inputs are not.
+			if (directoryBoundAbsence)
+				return true;
 			Ignore now = ignore(path);
 			return Arrays.equals(stat, now.stat) && raw.equals(now.raw);
 		}
@@ -52,6 +58,12 @@ final class UntrackedCacheScan {
 	private final Repository repository;
 
 	private final Path root;
+
+	private final String rootPrefix;
+
+	private final int directoryFlags;
+
+	private final UntrackedCacheConfig.Mode policyMode;
 
 	private final Ignore info;
 
@@ -85,11 +97,9 @@ final class UntrackedCacheScan {
 						&& !FsMonitor.isHookConfigured(repository)
 						&& !Files.exists(repository.getDirectory().toPath()
 								.resolve("fsmonitor--daemon.ipc")) //$NON-NLS-1$
-				|| repository.getConfig().get(UntrackedCacheConfig.KEY)
-						.getMode() == UntrackedCacheConfig.Mode.REMOVE
-				|| !"all" //$NON-NLS-1$
-						.equals(repository.getConfig().getString("status", null, //$NON-NLS-1$
-								"showUntrackedFiles")) //$NON-NLS-1$
+				|| directoryFlags(repository) < 0
+						&& repository.getConfig().get(UntrackedCacheConfig.KEY)
+								.getMode() != UntrackedCacheConfig.Mode.REMOVE
 				|| repository.getConfig().get(WorkingTreeOptions.KEY)
 						.isDirNoGitLinks()
 				|| SystemReader.getInstance()
@@ -102,12 +112,36 @@ final class UntrackedCacheScan {
 				.equals(UntrackedCacheConfig.parseBoolean(optional));
 	}
 
+	private static int directoryFlags(Repository repository) {
+		String mode = repository.getConfig().getString("status", null, //$NON-NLS-1$
+				"showUntrackedFiles"); //$NON-NLS-1$
+		if (mode == null || "normal".equals(mode)) { //$NON-NLS-1$
+			return UntrackedCache.SHOW_OTHER_DIRECTORIES | (1 << 2);
+		}
+		return "all".equals(mode) ? 0 : -1; //$NON-NLS-1$
+	}
+
 	private UntrackedCacheScan(Repository repository) throws IOException {
 		this.repository = repository;
+		directoryFlags = directoryFlags(repository);
+		policyMode = repository.getConfig().get(UntrackedCacheConfig.KEY)
+				.getMode();
 		root = repository.getWorkTree().toPath().toAbsolutePath().normalize();
-		info = ignore(repository.getCommonDirectory().toPath()
-				.resolve(Constants.INFO_EXCLUDE));
-		global = ignore(globalPath(repository));
+		String path = root.toString();
+		rootPrefix = path.endsWith(File.separator) ? path
+				: path + File.separator;
+		info = policyMode == UntrackedCacheConfig.Mode.REMOVE ? null
+				: ignore(repository.getCommonDirectory().toPath()
+						.resolve(Constants.INFO_EXCLUDE));
+		global = policyMode == UntrackedCacheConfig.Mode.REMOVE ? null
+				: ignore(globalPath(repository));
+	}
+
+	boolean acceptsIndex(DirCache index) {
+		// A KEEP/no-cache scan cannot publish anything. Discard its root-only
+		// capture before descending, without loading the index a second time.
+		return policyMode == UntrackedCacheConfig.Mode.WRITE
+				|| index.getUntrackedCache() != null;
 	}
 
 	private static Path globalPath(Repository repository) {
@@ -122,21 +156,27 @@ final class UntrackedCacheScan {
 	}
 
 	File[] list(File directory, UntrackedDirectoryListing listing) {
+		if (policyMode == UntrackedCacheConfig.Mode.REMOVE) {
+			return listing == null ? directory.listFiles()
+					: listing.list(directory);
+		}
 		File[] files = null;
 		if (!failed) {
 			try {
 				Path path = directory.toPath().toAbsolutePath().normalize();
 				var before = UntrackedDirectoryListing.stat(path);
-				Ignore rules = ignore(path.resolve(Constants.DOT_GIT_IGNORE));
+				String relative = relative(path);
 				files = listing == null ? directory.listFiles()
-						: listing.list(directory);
+						: listing.list(directory, path, relative, before);
+				Ignore rules = directoryIgnore(path, files,
+						listing == null || !listing.isNativeListing());
+				// build() compares this pre-list stat with a fresh stat after
+				// the entire scan, covering both listing and ignore capture.
 				if (files == null || !before.directory()
-						|| !Arrays.equals(before.fields(),
-								UntrackedDirectoryListing.stat(path).fields())
 						|| directories.size() >= 16384 || !rules.unchanged()) {
 					failed = true;
 				} else {
-					directories.put(relative(path),
+					directories.put(relative,
 							new Observed(path, before.fields(), rules));
 				}
 			} catch (IOException | RuntimeException unsupported) {
@@ -147,6 +187,9 @@ final class UntrackedCacheScan {
 	}
 
 	void entry(File file, boolean directory, boolean exists) {
+		if (policyMode == UntrackedCacheConfig.Mode.REMOVE || failed) {
+			return;
+		}
 		if (!exists) {
 			failed = true;
 		}
@@ -161,6 +204,12 @@ final class UntrackedCacheScan {
 	}
 
 	private String relative(Path path) {
+		if (path.equals(root))
+			return ""; //$NON-NLS-1$
+		if (path.startsWith(root)) {
+			return path.toString().substring(rootPrefix.length())
+					.replace(File.separatorChar, '/');
+		}
 		return root.relativize(path).toString().replace(File.separatorChar,
 				'/');
 	}
@@ -176,20 +225,55 @@ final class UntrackedCacheScan {
 		}
 	}
 
-	private static Ignore ignore(Path path) throws IOException {
+	private static Ignore directoryIgnore(Path directory, File[] files,
+			boolean complete) throws IOException {
+		if (complete && files != null) {
+			boolean present = false;
+			String suffix = File.separator + Constants.DOT_GIT_IGNORE;
+			for (File file : files) {
+				String name = file.getPath();
+				if (name.regionMatches(true, name.length() - suffix.length(),
+						suffix, 0, suffix.length())) {
+					present = true;
+					break;
+				}
+			}
+			if (!present) {
+				// The surrounding directory stat checks bind this complete
+				// listing's absence; native subsets cannot prove absence.
+				return new Ignore(null, null, ObjectId.zeroId(),
+						ObjectId.zeroId(), true);
+			}
+		}
+		Path path = directory.resolve(Constants.DOT_GIT_IGNORE);
 		int[] before = statIfPresent(path);
+		return before == null
+				? new Ignore(path, null, ObjectId.zeroId(), ObjectId.zeroId(),
+						true)
+				: ignore(path, before);
+	}
+
+	private static Ignore ignore(Path path) throws IOException {
+		return ignore(path, statIfPresent(path));
+	}
+
+	private static Ignore ignore(Path path, int[] before) throws IOException {
 		byte[] bytes = UntrackedDirectoryListing.readExclude(path);
 		if (!Arrays.equals(before, statIfPresent(path))) {
 			throw new IOException("Ignore input changed during capture"); //$NON-NLS-1$
 		}
 		return new Ignore(path, before,
 				UntrackedDirectoryListing.excludeId(bytes, false),
-				UntrackedDirectoryListing.excludeId(bytes, true));
+				UntrackedDirectoryListing.excludeId(bytes, true), false);
 	}
 
 	private UntrackedCache build(DirCache index, Set<String> untracked)
 			throws IOException {
-		if (failed || !eligible(repository) || untracked.size() > 200000
+		if (failed || !eligible(repository)
+				|| policyMode != repository.getConfig()
+						.get(UntrackedCacheConfig.KEY).getMode()
+				|| directoryFlags != directoryFlags(repository)
+				|| untracked.size() > 200000
 				|| !java.util.Objects.equals(global.path,
 						globalPath(repository))
 				|| !info.unchanged() || !global.unchanged()
@@ -205,7 +289,7 @@ final class UntrackedCacheScan {
 		}
 		UntrackedCache cache = new UntrackedCache();
 		cache.ident = base.ident.clone();
-		cache.dirFlags = 0;
+		cache.dirFlags = directoryFlags;
 		cache.infoExclude.oid = info.nativeId;
 		cache.excludesFile.oid = global.nativeId;
 		if (info.stat != null)
@@ -254,6 +338,35 @@ final class UntrackedCacheScan {
 			parent.untracked.add(Constants.encode(path.substring(slash + 1)
 					+ (directoryEntries.contains(path) ? "/" : ""))); //$NON-NLS-1$ //$NON-NLS-2$
 		}
+		if (directoryFlags != 0) {
+			// The API still reports every untracked file. Only the persisted
+			// normal-mode view collapses wholly untracked directories.
+			var paths = new ArrayList<>(directories.keySet());
+			for (int i = paths.size() - 1; i >= 0; i--) {
+				String path = paths.get(i);
+				Directory node = nodes.get(path);
+				if (path.isEmpty()) {
+					continue;
+				}
+				String prefix = path + "/"; //$NON-NLS-1$
+				int position = index.findEntry(prefix);
+				if (position < 0) {
+					position = -position - 1;
+				}
+				node.checkOnly = position == index.getEntryCount() || !index
+						.getEntry(position).getPathString().startsWith(prefix);
+				if (node.checkOnly && !node.untracked.isEmpty()) {
+					// Native check_only records need one nonignored witness.
+					node.untracked.sort(Arrays::compareUnsigned);
+					node.untracked.subList(1, node.untracked.size()).clear();
+					int slash = path.lastIndexOf('/');
+					Directory parent = nodes
+							.get(slash < 0 ? "" : path.substring(0, slash)); //$NON-NLS-1$
+					parent.untracked.add(
+							Constants.encode(path.substring(slash + 1) + "/")); //$NON-NLS-1$
+				}
+			}
+		}
 		for (Directory node : nodes.values()) {
 			node.untracked.sort(Arrays::compareUnsigned);
 		}
@@ -267,24 +380,35 @@ final class UntrackedCacheScan {
 		try {
 			if (monitor != null && monitor.isCancelled())
 				return false;
-			UntrackedCache cache = build(scanned, untracked);
-			if (cache == null)
+			// A failed scan query owns its deadline. Optional maintenance must
+			// not start another provider process or manufacture a new boundary.
+			if (scan == null && FsMonitor.isConfigured(repository))
 				return false;
-			byte[] payload = cache.write();
-			if (!FsMonitor.isConfigured(repository)
+			boolean remove = policyMode == UntrackedCacheConfig.Mode.REMOVE;
+			if (remove && scanned.getUntrackedCache() == null)
+				return false;
+			UntrackedCache cache = remove ? null : build(scanned, untracked);
+			if (!remove && cache == null)
+				return false;
+			if (cache != null && !FsMonitor.isConfigured(repository)
 					&& scanned.getUntrackedCache() != null && Arrays.equals(
-							payload, scanned.getUntrackedCache().write()))
+							cache.write(), scanned.getUntrackedCache().write()))
 				return false;
 			byte[][] written = { scanned.getReadIndexChecksum() };
 			DirCache locked = DirCache.lock(repository, event -> {
-				// Capture the owned checksum before any listener can write again.
+				// Capture the owned checksum before any listener can write
+				// again.
 				written[0] = event.getIndexChecksum();
 				repository.notifyIndexChanged(operationToken == null ? event
-						: new IndexChangedEvent(event.isInternal(), event.getFsMonitorPaths(),
+						: new IndexChangedEvent(event.isInternal(),
+								event.getFsMonitorPaths(),
 								event.getIndexChecksum(), operationToken));
 			}, scan);
 			try {
 				if (!eligible(repository)
+						|| policyMode != repository.getConfig()
+								.get(UntrackedCacheConfig.KEY).getMode()
+						|| directoryFlags != directoryFlags(repository)
 						|| monitor != null && monitor.isCancelled()
 						|| !Arrays.equals(scanned.getReadIndexChecksum(),
 								locked.getReadIndexChecksum())
@@ -298,7 +422,8 @@ final class UntrackedCacheScan {
 				if (!locked.commit()) {
 					return false;
 				}
-				publication = FsMonitor.finishPublication(repository, scan, written[0], late);
+				publication = FsMonitor.finishPublication(repository, scan,
+						written[0], late);
 				return true;
 			} finally {
 				locked.unlock();

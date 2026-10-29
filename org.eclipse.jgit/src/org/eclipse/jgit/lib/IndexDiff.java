@@ -286,7 +286,7 @@ public class IndexDiff {
 	}
 
 	/**
-	 * Publish recorded all-mode traversal data after a complete, uncancelled scan. A normal
+	 * Publish recorded traversal data after a complete, uncancelled scan. An ordinary
 	 * working-tree iterator does not record inputs and leaves the index intact.
 	 * @return whether the optional index update was committed
 	 * @since 7.8
@@ -303,7 +303,7 @@ public class IndexDiff {
 	 * @since 7.8
 	 */
 	public boolean updateUntrackedCache(Object operationToken) {
-		if (!completeScan || filter != null || reportIgnored
+		if (!completeScan || filter != null
 				|| initialWorkingTreeIterator.getClass() != FileTreeIterator.class) {
 			return false;
 		}

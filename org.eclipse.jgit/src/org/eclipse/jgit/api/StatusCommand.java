@@ -19,6 +19,7 @@ import java.util.WeakHashMap;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
 import org.eclipse.jgit.errors.NoWorkTreeException;
+import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.IndexDiff;
 import org.eclipse.jgit.lib.ProgressMonitor;
@@ -28,6 +29,7 @@ import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.WorkingTreeIterator;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
 import org.eclipse.jgit.util.FsMonitor;
+import org.eclipse.jgit.util.SystemReader;
 import org.eclipse.jgit.util.Trace2;
 
 /**
@@ -50,6 +52,9 @@ public class StatusCommand extends GitCommand<Status> {
 
 		// Reporting modes must retain independent results and provider clocks.
 		CachedStatus withoutIgnored;
+
+		// Read-only result reuse must not suppress later maintenance.
+		CachedStatus withoutUpdates;
 	}
 
 	private WorkingTreeIterator workingTreeIt;
@@ -62,17 +67,17 @@ public class StatusCommand extends GitCommand<Status> {
 
 	private boolean reportIgnored = true;
 
-	private boolean updateUntrackedCache;
+	private boolean updateUntrackedCache = true;
 
 	private FsMonitor.Probe completedProbe;
 
 	private FsMonitor.IndexQuery monitorQuery;
 
 	/**
-	 * Enable best-effort native UNTR publication after a complete scan.
-	 * The default is read-only. Publication requires ignored reporting disabled,
-	 * status.showUntrackedFiles=all, an enabled/existing cache, optional locks
-	 * permitted, and a supported filesystem. Hook notifications consumed by the
+	 * Select best-effort native UNTR maintenance after a complete scan.
+	 * Enabled by default for configured or existing caches. Optional locks must be
+	 * permitted and the filesystem supported. Ignored-path reporting is preserved.
+	 * Setting this to false leaves the index read-only. Hook notifications consumed by the
 	 * writer invalidate affected scan records. Partial or cancelled scans never write.
 	 * @param update whether to attempt an optional cache update
 	 * @return this command
@@ -189,6 +194,12 @@ public class StatusCommand extends GitCommand<Status> {
 			synchronized (MONITORED) {
 				cache = MONITORED.computeIfAbsent(repo,
 						r -> new CachedStatus());
+				if (!allowsIndexUpdates()) {
+					if (cache.withoutUpdates == null) {
+						cache.withoutUpdates = new CachedStatus();
+					}
+					cache = cache.withoutUpdates;
+				}
 				if (!reportIgnored) {
 					if (cache.withoutIgnored == null) {
 						cache.withoutIgnored = new CachedStatus();
@@ -239,6 +250,12 @@ public class StatusCommand extends GitCommand<Status> {
 		return scanStatus();
 	}
 
+	private boolean allowsIndexUpdates() {
+		String optional = SystemReader.getInstance().getenv("GIT_OPTIONAL_LOCKS"); //$NON-NLS-1$
+		return updateUntrackedCache && (optional == null || Boolean.TRUE
+				.equals(UntrackedCacheConfig.parseBoolean(optional)));
+	}
+
 	private Status scanStatus() throws GitAPIException, NoWorkTreeException {
 		return scanStatus(null, false);
 	}
@@ -255,8 +272,9 @@ public class StatusCommand extends GitCommand<Status> {
 	private Status scanStatus(FsMonitor.Probe probe, boolean forceContentCheck,
 			boolean untrackedOnly, Status previous)
 			throws GitAPIException, NoWorkTreeException {
+		boolean update = allowsIndexUpdates();
 		if (workingTreeIt == null) {
-			workingTreeIt = updateUntrackedCache && !reportIgnored && paths == null
+			workingTreeIt = update && paths == null
 					&& ignoreSubmoduleMode == null && !untrackedOnly
 						? new FileTreeIterator(repo, true) : new FileTreeIterator(repo);
 		}
@@ -300,7 +318,7 @@ public class StatusCommand extends GitCommand<Status> {
 			else
 				diff.diff(progressMonitor, ProgressMonitor.UNKNOWN,
 						ProgressMonitor.UNKNOWN, ""); //$NON-NLS-1$
-			if (updateUntrackedCache) {
+			if (update) {
 				diff.updateUntrackedCache();
 			}
 			completedProbe = diff.getFsMonitorProbe();

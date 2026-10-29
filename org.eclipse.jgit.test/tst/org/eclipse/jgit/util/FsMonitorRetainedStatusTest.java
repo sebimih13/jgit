@@ -44,19 +44,20 @@ public class FsMonitorRetainedStatusTest extends RepositoryTestCase {
 		db.getConfig().setBoolean("jgit", null, "fsmonitorCache", true);
 		db.getConfig().setBoolean("core", null, "untrackedCache", untrackedCache);
 		db.getConfig().save();
+		// This scenario isolates read-only result retention from writer refresh.
 		byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
 		// Native Git records ctime; JGit's same-stat edit uses the saved mtime.
 		TimeUnit.MILLISECONDS.sleep(1010 - System.currentTimeMillis() % 1000);
 		edit("a", "next\n");
 		NativeFsMonitorIndexSupport.reportToken(db, "first-clock", "a");
 		try (Git git = Git.wrap(db)) {
-			assertModified(git.status().call(), Set.of("a"));
+			assertModified(git.status().setUpdateUntrackedCache(false).call(), Set.of("a"));
 			edit("z", "next\n");
 			NativeFsMonitorIndexSupport.reportToken(db, "second-clock", "z");
-			Status second = git.status().call();
+			Status second = git.status().setUpdateUntrackedCache(false).call();
 			assertModified(second, Set.of("a", "z"));
 			NativeFsMonitorIndexSupport.reportToken(db, "quiet-clock");
-			Status quiet = git.status().call();
+			Status quiet = git.status().setUpdateUntrackedCache(false).call();
 			assertModified(quiet, Set.of("a", "z"));
 			if (untrackedCache) {
 				assertSame(second, quiet);
@@ -64,7 +65,7 @@ public class FsMonitorRetainedStatusTest extends RepositoryTestCase {
 			// Recheck content rather than indefinitely unioning old dirty results.
 			edit("a", "base\n");
 			NativeFsMonitorIndexSupport.reportToken(db, "restored-clock", "a");
-			assertModified(git.status().call(), Set.of("z"));
+			assertModified(git.status().setUpdateUntrackedCache(false).call(), Set.of("z"));
 		}
 		assertArrayEquals(original, Files.readAllBytes(db.getIndexFile().toPath()));
 	}

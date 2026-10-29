@@ -35,6 +35,37 @@ import org.junit.Test;
 
 public class DirCacheEntryTest {
 	@Test
+	public void testPathDecodingPreservesUnicodeSpelling() {
+		for (String path : new String[] { "dir/ascii", "dir/\u00e9",
+				"dir/e\u0301", "dir/\ud83d\ude80", "dir/\ufeffname" }) {
+			assertEquals(path, new DirCacheEntry(Constants.encode(path)).getPathString());
+		}
+		assertEquals("dir/new\nline",
+				DirCacheEntry.toString(Constants.encode("dir/new\nline")));
+	}
+
+	@Test
+	public void testPathDecodingReplacesMalformedUtf8() {
+		assertPathDecoding("\ufffd", 0x80);
+		assertPathDecoding("\ufffd(", 0xc3, 0x28);
+		assertPathDecoding("\ufffd", 0xe2, 0x82);
+		assertPathDecoding("\ufffd", 0xed, 0xa0, 0x80);
+		assertPathDecoding("\ufffd\ufffd", 0xc0, 0xaf);
+		assertPathDecoding("\ufffd\ufffd\ufffd\ufffd", 0xf4, 0x90, 0x80, 0x80);
+		assertPathDecoding("\ufffd\ufffd", 0xff, 0xfe);
+		assertPathDecoding("\ufeff", 0xef, 0xbb, 0xbf);
+	}
+
+	private static void assertPathDecoding(String expected, int... values) {
+		byte[] path = new byte[values.length];
+		for (int i = 0; i < values.length; i++) {
+			path[i] = (byte) values[i];
+		}
+		assertEquals(java.util.HexFormat.of().formatHex(path), expected,
+				DirCacheEntry.toString(path));
+	}
+
+	@Test
 	public void testIsValidPath() {
 		assertTrue(isValidPath("a"));
 		assertTrue(isValidPath("a/b"));

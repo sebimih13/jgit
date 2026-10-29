@@ -236,7 +236,15 @@ public class FsMonitorTest extends RepositoryTestCase {
 		String code = script == null
 				? "cat '" + response.getPath().replace("'", "'\\''") + "'\n"
 				: script;
-		Files.writeString(hook.toPath(), "#!/bin/sh\n" + code);
+		// Static fixtures report mutations once; a writer querying the scan's
+		// returned clock must not replay those pre-scan notifications.
+		String clock = new File(db.getDirectory(), "monitor-response-clock")
+				.getPath().replace("'", "'\\''");
+		String writer = "if test -e .git/index.lock; then\n"
+				+ "  if test \"$1\" = 1; then exit 0; fi\n"
+				+ "  if printf '%s' \"$2\" | cmp -s - '" + clock + "'; then\n"
+				+ "    printf '%s\\0' \"$2\"; exit 0\n  fi\nfi\n";
+		Files.writeString(hook.toPath(), "#!/bin/sh\n" + writer + code);
 		assertTrue(hook.setExecutable(true));
 		db.getConfig().setString("core", null, "fsmonitor",
 				hook.getAbsolutePath());
@@ -247,6 +255,9 @@ public class FsMonitorTest extends RepositoryTestCase {
 
 	private void reply(String data) throws Exception {
 		Files.write(response.toPath(), data.getBytes(StandardCharsets.UTF_8));
+		int nul = data.indexOf('\0');
+		Files.writeString(new File(db.getDirectory(), "monitor-response-clock").toPath(),
+				nul < 0 ? data : data.substring(0, nul));
 	}
 
 	private static void equal(Status a, Status b) {
@@ -267,7 +278,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 		db.getConfig().setBoolean("jgit", null, "fsmonitorCache", false);
 		db.getConfig().setBoolean("core", null, "fsmonitor", false);
 		try {
-			return git.status().call();
+			return git.status().setUpdateUntrackedCache(false).call();
 		} finally {
 			if (hook == null) {
 				db.getConfig().unset("core", null, "fsmonitor");
@@ -918,6 +929,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 		try (Git original = new Git(db)) {
 			Status first = original.status().call();
 			reply("next\0");
+			Status revalidated;
 			try (Git reopened = Git.open(db.getWorkTree())) {
 				assertNotSame(db, reopened.getRepository());
 				reopened.getRepository().getConfig().setBoolean("jgit", null,
@@ -931,7 +943,10 @@ public class FsMonitorTest extends RepositoryTestCase {
 				assertNotSame(first, second);
 				equal(first, second);
 				assertSame(second, reopened.status().call());
-				assertSame(first, original.status().call());
+				// The other repository object published a new persisted clock.
+				revalidated = original.status().call();
+				assertNotSame(first, revalidated);
+				equal(first, revalidated);
 			}
 			org.eclipse.jgit.lib.Repository other = createWorkRepository();
 			try (Git secondRepo = new Git(other)) {
@@ -945,7 +960,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 				Status isolated = secondRepo.status().call();
 				assertEquals(Set.of("only-other"), isolated.getUntracked());
 				assertSame(isolated, secondRepo.status().call());
-				assertSame(first, original.status().call());
+				assertSame(revalidated, original.status().call());
 			}
 		}
 	}
@@ -1214,7 +1229,7 @@ public class FsMonitorTest extends RepositoryTestCase {
 						content.equals("one") ? "" : " M directory/tracked\0",
 						nativeStatus);
 				reply("stable-" + version + "\0");
-				assertSame(changed, git.status().call());
+				assertSame(path, changed, git.status().call());
 			}
 		}
 	}

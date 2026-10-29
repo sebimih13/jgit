@@ -61,18 +61,25 @@ final class IndexPreloader {
 		result.monitorFs = fs;
 		Map<String, File> parents = new HashMap<>();
 		File root = repository.getWorkTree();
+		String previousDirectory = ""; //$NON-NLS-1$
+		int previousSlash = Integer.MIN_VALUE;
+		Map<String, MonitorEntry> directoryEntries = null;
 		for (DirCacheEntry entry : entries) {
 			String path = entry.getPathString();
 			int slash = path.lastIndexOf('/');
-			String directory = slash < 0 ? "" : path.substring(0, slash); //$NON-NLS-1$
-			File parent = parents.computeIfAbsent(directory,
-					key -> fs.normalize(new File(root, key)));
-			result.monitoredDirectories
-					.computeIfAbsent(parent, unused -> new HashMap<>())
-					.put(fs.normalize(path.substring(slash + 1)),
-							new MonitorEntry(entry.getFileMode(),
-									entry.getLastModifiedInstant(),
-									Integer.toUnsignedLong(entry.getLength())));
+			if (directoryEntries == null || slash != previousSlash
+					|| slash >= 0 && !path.regionMatches(0, previousDirectory, 0, slash)) {
+				String directory = slash < 0 ? "" : path.substring(0, slash); //$NON-NLS-1$
+				File parent = parents.computeIfAbsent(directory,
+						key -> fs.normalize(new File(root, key)));
+				directoryEntries = result.monitoredDirectories
+						.computeIfAbsent(parent, unused -> new HashMap<>());
+				previousDirectory = directory;
+				previousSlash = slash;
+			}
+			directoryEntries.put(fs.normalize(path.substring(slash + 1)),
+					new MonitorEntry(entry.getFileMode(), entry.getLastModifiedInstant(),
+							Integer.toUnsignedLong(entry.getLength())));
 		}
 		return result;
 	}

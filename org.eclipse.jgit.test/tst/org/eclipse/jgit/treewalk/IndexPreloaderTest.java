@@ -25,6 +25,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheBuilder;
 import org.eclipse.jgit.dircache.DirCacheEntry;
@@ -37,6 +38,100 @@ import org.junit.Assume;
 import org.junit.Test;
 
 public class IndexPreloaderTest extends RepositoryTestCase {
+	@Test
+	public void identitySetWithEqualEntrySubclassesKeepsCollectionSemantics() {
+		Set<DirCacheEntry> input = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+		input.add(new EqualEntry("a"));
+		input.add(new EqualEntry("a"));
+		assertEquals(2, input.size());
+		new FileTreeIterator(db).setFsMonitorValidEntries(input);
+	}
+
+	private static class EqualEntry extends DirCacheEntry {
+		EqualEntry(String path) {
+			super(path);
+			setFileMode(FileMode.REGULAR_FILE);
+		}
+
+		@Override
+		public boolean equals(Object other) {
+			return other instanceof EqualEntry
+					&& getPathString().equals(((EqualEntry) other).getPathString());
+		}
+
+		@Override
+		public int hashCode() {
+			return getPathString().hashCode();
+		}
+
+		@Override
+		public String toString() {
+			throw new AssertionError("Valid collection input must not be rendered as an error");
+		}
+	}
+
+	@Test
+	public void trustedSetAndDuplicateListHaveIndependentMembership() throws Exception {
+		writeTrashFile("a", "base\n");
+		writeTrashFile("b", "base\n");
+		try (Git git = Git.wrap(db)) {
+			git.add().addFilepattern(".").call();
+		}
+		DirCache index = db.readDirCache();
+		writeTrashFile("b", "changed-length\n");
+		for (boolean set : new boolean[] { true, false }) {
+			java.util.Collection<DirCacheEntry> input = set
+					? new HashSet<>(Set.of(index.getEntry("a")))
+					: new java.util.ArrayList<>(List.of(index.getEntry("a"), index.getEntry("a")));
+			FileTreeIterator iterator = new FileTreeIterator(db);
+			iterator.setFsMonitorValidEntries(input);
+			input.clear();
+			input.add(index.getEntry("b"));
+			try (var reader = db.newObjectReader(); TreeWalk walk = new TreeWalk(db)) {
+				walk.addTree(new org.eclipse.jgit.dircache.DirCacheIterator(index));
+				walk.addTree(iterator);
+				walk.setRecursive(true);
+				boolean found = false;
+				while (walk.next()) {
+					if (walk.getPathString().equals("b")) {
+						found = true;
+						assertTrue("Later additions must not acquire monitor validity",
+								walk.getTree(1, WorkingTreeIterator.class)
+										.isModified(index.getEntry("b"), false, reader));
+					}
+				}
+				assertTrue(found);
+			}
+		}
+	}
+
+	@Test
+	public void monitoredDirectoryGroupsCanRepeatAndSharePrefixes() throws Exception {
+		List<DirCacheEntry> entries = new java.util.ArrayList<>();
+		for (String path : List.of("a/x", "b/y", "root", "a/z", "a/nested/q", "a/w")) {
+			DirCacheEntry entry = new DirCacheEntry(path);
+			entry.setFileMode(FileMode.REGULAR_FILE);
+			entry.setLength(entries.size() + 10);
+			entries.add(entry);
+		}
+		IndexPreloader snapshot = IndexPreloader.fromMonitor(db, db.getFS(), entries);
+		entries.get(0).setLength(99);
+		File a = new File(trash, "a");
+		var aFiles = snapshot.takeDirectory(a,
+				new File[] { new File(a, "x"), new File(a, "z"), new File(a, "w"), new File(a, "other") });
+		assertEquals(Set.of("x", "z", "w"), aFiles.keySet());
+		assertEquals(10, aFiles.get("x").getLength());
+		assertEquals(13, aFiles.get("z").getLength());
+		assertEquals(15, aFiles.get("w").getLength());
+		File b = new File(trash, "b");
+		assertEquals(11, snapshot.takeDirectory(b, new File[] { new File(b, "y") }).get("y").getLength());
+		File nested = new File(a, "nested");
+		assertEquals(14, snapshot.takeDirectory(nested,
+				new File[] { new File(nested, "q") }).get("q").getLength());
+		assertEquals(12, snapshot.takeDirectory(trash,
+				new File[] { new File(trash, "root") }).get("root").getLength());
+	}
+
 	@Test
 	public void nativeDefaultEnablesPreloadAndExplicitFalseDisablesIt() throws Exception {
 		Assume.assumeTrue(db.getFS().getClass() == FS_POSIX.class);

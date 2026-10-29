@@ -35,7 +35,9 @@ import org.eclipse.jgit.lib.ObjectInserter;
 import org.eclipse.jgit.util.FS_POSIX;
 import org.eclipse.jgit.util.SystemReader;
 
-/** Native UNTR names, with complete Java listings for ignored-path reporting. */
+/**
+ * Native UNTR names, with complete Java listings for ignored-path reporting.
+ */
 final class UntrackedDirectoryListing {
 	private static final Map<Repository, Listings> REPOSITORIES = new WeakHashMap<>();
 
@@ -149,7 +151,8 @@ final class UntrackedDirectoryListing {
 					return null;
 				}
 			}
-			UntrackedDirectoryListing result = new UntrackedDirectoryListing(cache,
+			UntrackedDirectoryListing result = new UntrackedDirectoryListing(
+					cache,
 					repo.getWorkTree().toPath().toAbsolutePath().normalize(),
 					Files.getLastModifiedTime(repo.getIndexFile().toPath())
 							.toInstant(),
@@ -182,10 +185,14 @@ final class UntrackedDirectoryListing {
 	}
 
 	File[] list(File directory) {
-		lastNative = false;
 		Path path = directory.toPath().toAbsolutePath().normalize();
 		String relative = root.relativize(path).toString()
 				.replace(File.separatorChar, '/');
+		return list(directory, path, relative, null);
+	}
+
+	File[] list(File directory, Path path, String relative, Stat before) {
+		lastNative = false;
 		Directory node = node(relative);
 		Listing previous = listings.get(relative);
 		// A rejected native record cannot validate names. Until it changes,
@@ -195,7 +202,7 @@ final class UntrackedDirectoryListing {
 			cache.dirOpened++;
 			return directory.listFiles();
 		}
-		int[] stat = validatedStat(path, node);
+		int[] stat = validatedStat(path, node, before);
 		if (stat != null) {
 			reusable = true;
 			if (previous != null && previous.names != null
@@ -236,8 +243,8 @@ final class UntrackedDirectoryListing {
 		return lastNative;
 	}
 
-	private File[] nativeListing(File directory, String relative, Directory node,
-			int[] stat) {
+	private File[] nativeListing(File directory, String relative,
+			Directory node, int[] stat) {
 		if (node.checkOnly) {
 			return null;
 		}
@@ -247,7 +254,8 @@ final class UntrackedDirectoryListing {
 			}
 			String key = nativeKeyPrefix + relative;
 			Listing prior = listings.get(key);
-			if (prior != null && prior.names != null && Arrays.equals(prior.stat, stat)) {
+			if (prior != null && prior.names != null
+					&& Arrays.equals(prior.stat, stat)) {
 				return files(directory, prior.names);
 			}
 			Set<String> names = new HashSet<>();
@@ -284,13 +292,15 @@ final class UntrackedDirectoryListing {
 					}
 				}
 			}
-			// Even an ignored .gitignore is needed to evaluate the other entries.
+			// Even an ignored .gitignore is needed to evaluate the other
+			// entries.
 			if (!ObjectId.zeroId().equals(node.excludeOid)) {
 				names.add(Constants.DOT_GIT_IGNORE);
 			}
 			String[] array = names.toArray(String[]::new);
 			// Retain ordered input for WorkingTreeIterator's adaptive sort on
-			// subsequent walks, rather than repeating a hash-table iteration order.
+			// subsequent walks, rather than repeating a hash-table iteration
+			// order.
 			Arrays.sort(array);
 			int characters = 0;
 			for (String name : array) {
@@ -320,9 +330,12 @@ final class UntrackedDirectoryListing {
 						.getXdgConfigDirectory(repository.getFS());
 				excludes = xdg == null ? null : xdg.resolve("git/ignore"); //$NON-NLS-1$
 			}
-			globalExcludesValid = Boolean.valueOf(matchesExclude(excludes,
-					cache.excludesFile.oid) && matchesExclude(repository.getCommonDirectory()
-						.toPath().resolve(Constants.INFO_EXCLUDE), cache.infoExclude.oid));
+			globalExcludesValid = Boolean
+					.valueOf(matchesExclude(excludes, cache.excludesFile.oid)
+							&& matchesExclude(
+									repository.getCommonDirectory().toPath()
+											.resolve(Constants.INFO_EXCLUDE),
+									cache.infoExclude.oid));
 		}
 		if (!globalExcludesValid.booleanValue()) {
 			return false;
@@ -335,11 +348,13 @@ final class UntrackedDirectoryListing {
 		if (!validDirectoryExclude(path, directory, current)) {
 			return false;
 		}
-		for (String part : relative.isEmpty() ? new String[0] : relative.split("/")) { //$NON-NLS-1$
+		for (String part : relative.isEmpty() ? new String[0]
+				: relative.split("/")) { //$NON-NLS-1$
 			path = path.isEmpty() ? part : path + "/" + part; //$NON-NLS-1$
 			current = node(path);
 			directory = directory.resolve(part);
-			if (current == null || !validDirectoryExclude(path, directory, current)) {
+			if (current == null
+					|| !validDirectoryExclude(path, directory, current)) {
 				return false;
 			}
 		}
@@ -350,18 +365,20 @@ final class UntrackedDirectoryListing {
 			Directory node) throws IOException {
 		Boolean valid = directoryExcludesValid.get(path);
 		if (valid == null) {
-			valid = Boolean.valueOf(matchesExclude(
-					directory.resolve(Constants.DOT_GIT_IGNORE), node.excludeOid));
+			valid = Boolean.valueOf(
+					matchesExclude(directory.resolve(Constants.DOT_GIT_IGNORE),
+							node.excludeOid));
 			directoryExcludesValid.put(path, valid);
 		}
 		return valid.booleanValue();
 	}
 
-	private static boolean matchesExclude(Path file, ObjectId expected) throws IOException {
+	private static boolean matchesExclude(Path file, ObjectId expected)
+			throws IOException {
 		byte[] bytes = readExclude(file);
 		return bytes == null ? ObjectId.zeroId().equals(expected)
-				: excludeId(bytes, false).equals(expected)
-						|| bytes.length != 0 && excludeId(bytes, true).equals(expected);
+				: excludeId(bytes, false).equals(expected) || bytes.length != 0
+						&& excludeId(bytes, true).equals(expected);
 	}
 
 	static byte[] readExclude(Path file) throws IOException {
@@ -394,7 +411,8 @@ final class UntrackedDirectoryListing {
 		}
 	}
 
-	private static String component(byte[] raw, boolean slash) throws IOException {
+	private static String component(byte[] raw, boolean slash)
+			throws IOException {
 		String name = java.nio.charset.StandardCharsets.UTF_8.newDecoder()
 				.onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
 				.decode(java.nio.ByteBuffer.wrap(raw)).toString();
@@ -441,25 +459,31 @@ final class UntrackedDirectoryListing {
 	}
 
 	private int[] validatedStat(Path path, Directory node) {
+		return validatedStat(path, node, null);
+	}
+
+	private int[] validatedStat(Path path, Directory node, Stat before) {
 		if (node == null || !node.valid || !path.startsWith(root)) {
 			return null;
 		}
 		try {
-			Stat observed = stat(path);
+			Stat observed = before == null ? stat(path) : before;
 			// Reject the whole timestamp second, including native builds
 			// without nanosecond racy checks.
-			if (!observed.directory() || observed.modified().getEpochSecond()
-					>= indexTime.getEpochSecond()) {
+			if (!observed.directory() || observed.modified()
+					.getEpochSecond() >= indexTime.getEpochSecond()) {
 				return null;
 			}
 			return Arrays.equals(observed.fields(), node.stat.fields)
-					? observed.fields() : null;
+					? observed.fields()
+					: null;
 		} catch (IOException | RuntimeException unsupported) {
 			return null;
 		}
 	}
 
-	record Stat(int[] fields, Instant modified, boolean directory) { }
+	record Stat(int[] fields, Instant modified, boolean directory) {
+	}
 
 	static Stat stat(Path path) throws IOException {
 		Map<String, Object> values = Files.readAttributes(path,
@@ -478,6 +502,7 @@ final class UntrackedDirectoryListing {
 				((Number) values.get("ino")).intValue(), //$NON-NLS-1$
 				((Number) values.get("uid")).intValue(), //$NON-NLS-1$
 				((Number) values.get("gid")).intValue(), encodedSize }; //$NON-NLS-1$
-		return new Stat(fields, mtime, Boolean.TRUE.equals(values.get("isDirectory"))); //$NON-NLS-1$
+		return new Stat(fields, mtime,
+				Boolean.TRUE.equals(values.get("isDirectory"))); //$NON-NLS-1$
 	}
 }

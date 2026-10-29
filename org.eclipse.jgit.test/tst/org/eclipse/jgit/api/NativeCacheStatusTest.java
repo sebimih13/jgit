@@ -89,7 +89,7 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		Path hook = db.getDirectory().toPath().resolve("hooks/fsmonitor-test");
 		Files.createDirectories(hook.getParent());
 		Files.writeString(hook,
-				"#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = 2 ] || exit 2\nprintf '%s\\n' \"$2\" >>.git/native-cache-calls\ncat .git/native-cache-response\n");
+				"#!/bin/sh\n[ \"$#\" = 2 ] && [ \"$1\" = 2 ] || exit 2\nprintf '%s\\n' \"$2\" >>.git/native-cache-calls\nclock=$(cat .git/native-cache-clock)\nif test \"$2\" = \"$clock\"; then printf '%s\\000' \"$clock\"; else cat .git/native-cache-response; fi\n");
 		assertTrue(FS.DETECTED.setExecute(hook.toFile(), true));
 		db.getConfig().setString("core", null, "fsmonitor", hook.toString());
 		db.getConfig().save();
@@ -115,6 +115,8 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		for (String path : paths)
 			text.append(path).append('\0');
 		Files.writeString(response, text.toString());
+		Files.writeString(db.getDirectory().toPath().resolve("native-cache-clock"),
+				"token" + token + "\n");
 	}
 
 	private int monitorCalls() throws Exception {
@@ -156,7 +158,7 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		db.getConfig().setBoolean("jgit", null, "fsmonitorCache", false);
 		db.getConfig().setBoolean("core", null, "fsmonitor", false);
 		try {
-			return git.status().call();
+			return git.status().setUpdateUntrackedCache(false).call();
 		} finally {
 			if (hook == null) {
 				db.getConfig().unset("core", null, "fsmonitor");
@@ -183,7 +185,11 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 	}
 
 	private Status check() throws Exception {
-		Status actual = git.status().call();
+		return check(true);
+	}
+
+	private Status check(boolean update) throws Exception {
+		Status actual = git.status().setUpdateUntrackedCache(update).call();
 		nativeOracle(actual.getAdded(), actual.getChanged(),
 				actual.getRemoved(), actual.getModified(), actual.getMissing(),
 				actual.getUntracked());
@@ -294,12 +300,12 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		assertNotNull(imported.root);
 		assertTrue(imported.root.valid);
 		byte[] payload = imported.write();
-		var before = git.status().call();
+		var before = git.status().setUpdateUntrackedCache(false).call();
 		assertEquals(Set.of("tracked", "modified", "dir1/tracked",
 				"dir1/modified", "dir2/tracked", "dir2/modified"),
 				before.getUntracked());
 		reply(".git", ".git/index", "dir1/.git", "dir1/.git/index");
-		var after = check();
+		var after = check(false);
 		equal(before, after);
 		assertArrayEquals(index, Files.readAllBytes(db.getIndexFile().toPath()));
 		assertArrayEquals(payload, db.readDirCache().getUntrackedCache().write());
@@ -337,12 +343,13 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		put("tracked", "changed after monitoring lifetime ended\n");
 		reply();
 		try (Git reopened = Git.open(db.getWorkTree())) {
+			int previousCalls = monitorCalls();
 			var after = reopened.status().call();
 			assertNotSame(before, after);
 			assertEquals(Set.of("tracked"), after.getModified());
 			var calls = Files.readAllLines(
 					db.getDirectory().toPath().resolve("native-cache-calls"));
-			assertEquals("c:0:0:0:0", calls.get(calls.size() - 1));
+			assertEquals("c:0:0:0:0", calls.get(previousCalls));
 			nativeOracle(after.getAdded(), after.getChanged(),
 					after.getRemoved(), after.getModified(), after.getMissing(),
 					after.getUntracked());
@@ -732,7 +739,7 @@ public class NativeCacheStatusTest extends RepositoryTestCase {
 		put("loose", "untracked");
 		reply("loose");
 		assertEquals(Set.of("loose"), check().getUntracked());
-		assertTrue(!Files.exists(db.getIndexFile().toPath()));
+		assertEquals(untrackedCache, Files.exists(db.getIndexFile().toPath()));
 	}
 
 	// t7063 config transitions, extended through a warm monitor/cache instance.

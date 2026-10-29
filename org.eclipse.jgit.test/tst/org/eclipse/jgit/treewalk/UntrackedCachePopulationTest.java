@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.junit.RepositoryTestCase;
+import org.eclipse.jgit.junit.NativeUntrackedNormalSupport;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.IndexDiff;
 import org.eclipse.jgit.lib.ProgressMonitor;
@@ -69,8 +70,8 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 		byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
 		var before = db.readDirCache();
 		try (Git git = Git.wrap(db)) {
-			git.status().setReportIgnored(false).call();
-			assertArrayEquals("Ordinary status stays read-only", original,
+			git.status().setReportIgnored(false).setUpdateUntrackedCache(false).call();
+			assertArrayEquals("Explicit read-only status", original,
 					Files.readAllBytes(db.getIndexFile().toPath()));
 			var status = git.status().setReportIgnored(false)
 					.setUpdateUntrackedCache(true).call();
@@ -99,6 +100,32 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 			assertEquals(Set.of("tracked", "loose", ".gitignore"), names);
 			assertEquals(0, index.getUntrackedCache().dirOpened);
 		}
+	}
+
+	@Test
+	public void creatingAnAbsentIgnoreAfterScanRejectsPublicationWithRestoredMtime() throws Exception {
+		prepare();
+		writeTrashFile("no-ignore/loose", "new\n");
+		NativeUntrackedNormalSupport.ageDirectories(db);
+		var diff = recordedDiff();
+		Path directory = db.getWorkTree().toPath().resolve("no-ignore");
+		var modified = Files.getLastModifiedTime(directory);
+		var before = UntrackedDirectoryListing.stat(directory);
+		Files.writeString(directory.resolve(".gitignore"), "loose\n");
+		Files.setLastModifiedTime(directory, modified);
+		assertFalse(java.util.Arrays.equals(before.fields(), UntrackedDirectoryListing.stat(directory).fields()));
+		byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
+		assertFalse(diff.updateUntrackedCache());
+		assertArrayEquals(original, Files.readAllBytes(db.getIndexFile().toPath()));
+	}
+
+	@Test
+	public void nestedUnicodeDirectoriesPublishNativeUntrackedNames() throws Exception {
+		prepare();
+		writeTrashFile("é/嵌套/loose\nfile", "new\n");
+		NativeUntrackedNormalSupport.ageDirectories(db);
+		assertTrue(recordedDiff().updateUntrackedCache());
+		assertEquals(Set.of("loose", "sub/loose", "sub/.gitignore", "é/嵌套/loose\nfile"), nativeStatus());
 	}
 
 	@Test
@@ -157,11 +184,11 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 	}
 
 	@Test
-	public void partialIgnoredAndOptionalLockDisabledScansRemainReadOnly() throws Exception {
+	public void partialReadOnlyAndOptionalLockDisabledScansRemainReadOnly() throws Exception {
 		prepare();
 		byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
 		try (Git git = Git.wrap(db)) {
-			git.status().setUpdateUntrackedCache(true).call();
+			git.status().setUpdateUntrackedCache(false).call();
 			assertArrayEquals(original, Files.readAllBytes(db.getIndexFile().toPath()));
 			git.status().setReportIgnored(false).setUpdateUntrackedCache(true)
 					.addPath("sub").call();
@@ -589,7 +616,7 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 		}
 		byte[] original = Files.readAllBytes(db.getIndexFile().toPath());
 		try (Git git = Git.wrap(db)) {
-			var status = git.status().setReportIgnored(false).call();
+			var status = git.status().setReportIgnored(false).setUpdateUntrackedCache(false).call();
 			assertEquals(Set.of("sub/tracked"), status.getModified());
 			assertNativeStatus(status);
 		}
@@ -635,7 +662,7 @@ public class UntrackedCachePopulationTest extends RepositoryTestCase {
 		assertTrue(Files.notExists(db.getIndexFile().toPath()));
 		try (Git git = Git.wrap(db)) {
 			assertEquals(Set.of("loose", "sub/loose"),
-					git.status().setReportIgnored(false).call().getUntracked());
+					git.status().setReportIgnored(false).setUpdateUntrackedCache(false).call().getUntracked());
 			assertTrue(Files.notExists(db.getIndexFile().toPath()));
 			var status = git.status().setReportIgnored(false).setUpdateUntrackedCache(true).call();
 			assertEquals(Set.of("loose", "sub/loose"), status.getUntracked());

@@ -20,7 +20,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.text.MessageFormat;
 import java.time.Instant;
@@ -895,7 +894,7 @@ public class DirCacheEntry {
 	}
 
 	static String toString(byte[] path) {
-		return UTF_8.decode(ByteBuffer.wrap(path)).toString();
+		return new String(path, UTF_8);
 	}
 
 	static int getMaximumInfoLength(boolean extended) {
