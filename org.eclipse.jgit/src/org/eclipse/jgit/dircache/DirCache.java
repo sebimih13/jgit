@@ -179,6 +179,7 @@ public class DirCache {
 			throws CorruptObjectException, IOException {
 		final DirCache c = read(repository.getIndexFile(), repository.getFS());
 		c.repository = repository;
+		c.clearSkipWorkTreeFromPresentFiles();
 		return c;
 	}
 
@@ -292,6 +293,7 @@ public class DirCache {
 				indexChangedListener);
 		c.repository = repository;
 		try {
+			c.clearSkipWorkTreeFromPresentFiles();
 			if (!c.fsMonitorCacheExplicit) {
 				var refresh = FsMonitor.refreshIndexWithChanges(repository, c, scan);
 				c.fsMonitorCache = refresh.cache();
@@ -686,6 +688,25 @@ public class DirCache {
 				clear();
 			}
 			snapshot = FileSnapshot.save(liveFile);
+		}
+		clearSkipWorkTreeFromPresentFiles();
+	}
+
+	private void clearSkipWorkTreeFromPresentFiles() {
+		if (repository == null || repository.isBare()
+				|| !repository.getConfig().getBoolean("core", "sparseCheckout", false) //$NON-NLS-1$ //$NON-NLS-2$
+				|| repository.getConfig().getBoolean("sparse", //$NON-NLS-1$
+						"expectFilesOutsideOfPatterns", false)) { //$NON-NLS-1$
+			return;
+		}
+		// Match sparse-index.c:clear_skip_worktree_from_present_files_full.
+		// Ordinary (non-sparse) repositories keep their explicit skip hints.
+		for (int i = 0; i < entryCnt; i++) {
+			DirCacheEntry entry = sortedEntries[i];
+			if (entry.isSkipWorkTree() && repository.getFS().exists(
+					new File(repository.getWorkTree(), entry.getPathString()))) {
+				entry.clearSkipWorkTree();
+			}
 		}
 	}
 

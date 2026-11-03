@@ -40,6 +40,9 @@ import org.junit.runners.Suite;
 		UntrackedCacheNormalPublicationTest.class,
 		UntrackedCacheAutomaticPublicationTest.class,
 		PreloadIndexCommandTest.class, IndexPreloaderTest.class,
-		IndexSkipHashTest.class, NativeIndexVersionTest.class })
+		IndexSkipHashTest.class, NativeIndexVersionTest.class,
+		SparseUntrackedCacheStatusTest.class,
+		org.eclipse.jgit.treewalk.UntrackedCacheEnvironmentTest.class,
+		org.eclipse.jgit.dircache.DirCacheExtendedEntryCopyTest.class })
 public class NativeCacheOptionsSuite {
 }

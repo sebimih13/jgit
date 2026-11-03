@@ -977,6 +977,10 @@ public class TreeWalk implements AutoCloseable, AttributesProvider {
 		return t.matches == currentHead ? (T) t : null;
 	}
 
+	AbstractTreeIterator getTreeIterator(int nth) {
+		return trees[nth];
+	}
+
 	/**
 	 * Obtain the raw {@link org.eclipse.jgit.lib.FileMode} bits for the current
 	 * entry.

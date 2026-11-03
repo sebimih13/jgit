@@ -91,6 +91,8 @@ final class UntrackedCacheScan {
 	}
 
 	private static boolean eligible(Repository repository) {
+		String disabled = SystemReader.getInstance()
+				.getenv("GIT_DISABLE_UNTRACKED_CACHE"); //$NON-NLS-1$
 		if (repository.isBare()
 				|| repository.getFS().getClass() != FS_POSIX.class
 				|| FsMonitor.isConfigured(repository)
@@ -102,8 +104,8 @@ final class UntrackedCacheScan {
 								.getMode() != UntrackedCacheConfig.Mode.REMOVE
 				|| repository.getConfig().get(WorkingTreeOptions.KEY)
 						.isDirNoGitLinks()
-				|| SystemReader.getInstance()
-						.getenv("GIT_DISABLE_UNTRACKED_CACHE") != null) { //$NON-NLS-1$
+				|| disabled != null && !Boolean.FALSE
+						.equals(UntrackedCacheConfig.parseBoolean(disabled))) {
 			return false;
 		}
 		String optional = SystemReader.getInstance()
@@ -320,12 +322,20 @@ final class UntrackedCacheScan {
 			}
 			System.arraycopy(observed.stat, 0, node.stat.fields, 0, 9);
 			node.excludeOid = observed.ignore.nativeId;
-			var indexed = index
-					.getEntry(path.isEmpty() ? Constants.DOT_GIT_IGNORE
-							: path + "/" + Constants.DOT_GIT_IGNORE); //$NON-NLS-1$
-			if (indexed != null && indexed.getStage() == 0
-					&& indexed.getObjectId().equals(observed.ignore.raw)) {
-				node.excludeOid = observed.ignore.raw;
+			String ignorePath = path.isEmpty() ? Constants.DOT_GIT_IGNORE
+					: path + "/" + Constants.DOT_GIT_IGNORE; //$NON-NLS-1$
+			ObjectId sparseIgnore = observed.ignore.directoryBoundAbsence
+					? WorkingTreeIterator.indexedIgnore(index, ignorePath) : null;
+			var indexed = index.getEntry(ignorePath);
+			if (sparseIgnore != null) {
+				// The scan's unchanged index supplies absent skipped ignore rules.
+				node.excludeOid = sparseIgnore;
+			} else if (indexed != null && indexed.getStage() == 0
+					&& (indexed.isSkipWorkTree()
+							|| indexed.getObjectId().equals(observed.ignore.raw))) {
+				// Native add_patterns uses the index OID for up-to-date skip
+				// entries, even when the worktree pattern file is present.
+				node.excludeOid = indexed.getObjectId();
 			}
 			node.valid = node.recurse = true;
 		}

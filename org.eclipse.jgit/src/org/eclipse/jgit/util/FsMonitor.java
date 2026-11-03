@@ -535,7 +535,7 @@ public final class FsMonitor {
 				if (stored == null && !probe.changedPaths.contains("/")) { //$NON-NLS-1$
 					// No persisted clock can validate old tracked or untracked
 					// metadata. Retain only the boundary for the full scan.
-					Probe initial = new Probe(probe.fingerprint, probe.context, probe.token, false,
+					Probe initial = new Probe(probe.fingerprint, probe.context, probe.filesystemContext, probe.token, false,
 							List.of("/"), probe.hasUntrackedCache, probe.version); //$NON-NLS-1$
 					initial.invalidationScopeUnknown = probe.invalidationScopeUnknown;
 					probe = initial;
@@ -630,7 +630,7 @@ public final class FsMonitor {
 				if (Arrays.equals(writtenChecksum, index.checksum)
 						&& scan.context.equals(contextFingerprint(repository))) {
 					result = new Probe(fingerprint(index.fingerprint, scan.context),
-							scan.context, scan.token, false, scan.changedPaths, true, scan.version);
+							scan.context, scan.filesystemContext, scan.token, false, scan.changedPaths, true, scan.version);
 					// This result predates the writer's notifications. Preserve
 					// known late work independently of a later provider reply.
 					result.followupPaths = latePaths == null ? List.of("/") //$NON-NLS-1$
@@ -648,6 +648,8 @@ public final class FsMonitor {
 		private final String fingerprint;
 
 		private final String context;
+
+		private final String filesystemContext;
 
 		private List<String> followupPaths = List.of();
 
@@ -669,10 +671,12 @@ public final class FsMonitor {
 
 		private final boolean hasUntrackedCache;
 
-		private Probe(String fingerprint, String context, String token, boolean unchanged,
+		private Probe(String fingerprint, String context, String filesystemContext,
+				String token, boolean unchanged,
 				List<String> changedPaths, boolean hasUntrackedCache, int version) {
 			this.fingerprint = fingerprint;
 			this.context = context;
+			this.filesystemContext = filesystemContext;
 			this.token = token;
 			this.version = version;
 			this.unchanged = unchanged;
@@ -773,11 +777,15 @@ public final class FsMonitor {
 	public static final class State {
 		private String fingerprint;
 
+		private String filesystemContext;
+
 		private String token;
 
 		private int version;
 
 		private String checkedIndex;
+
+		private String checkedRules;
 
 		private byte[] indexChecksum;
 
@@ -802,7 +810,7 @@ public final class FsMonitor {
 		 */
 		public synchronized void clear() {
 			boolean checkContents = token != null || fullContentCheckRequired;
-			fingerprint = token = checkedIndex = null;
+			fingerprint = token = checkedIndex = checkedRules = filesystemContext = null;
 			indexChecksum = null;
 			indexDirtyEntries = null;
 			indexEntryCount = 0;
@@ -890,6 +898,7 @@ public final class FsMonitor {
 						index = current.fingerprint;
 						indexChecksum = current.checksum;
 						hasUntrackedCache = suppliedIndex.getUntrackedCache() != null;
+						checkedRules = ruleFingerprint(suppliedIndex);
 						supportedIndex = true;
 						checkedIndex = index;
 					} else {
@@ -906,6 +915,7 @@ public final class FsMonitor {
 							indexDirtyEntries = cache.getFsMonitorCache().getDirtyEntries();
 						}
 						hasUntrackedCache = cache.getUntrackedCache() != null;
+						checkedRules = ruleFingerprint(cache);
 						supportedIndex = true;
 						for (int i = 0; i < cache.getEntryCount(); i++) {
 							if (!storedQuery && cache.getEntry(i)
@@ -924,8 +934,10 @@ public final class FsMonitor {
 					}
 					unsupportedIndex = null;
 					supported = true;
-					String context = contextFingerprint(repository,
+					ContextFingerprint inputs = contextFingerprints(repository,
 							daemon ? null : executable.toPath());
+					String context = inputs.result();
+					String filesystem = inputs.filesystem() + ":" + checkedRules; //$NON-NLS-1$
 					String key = fingerprint(index, context);
 					if (requiredFingerprint != null && !requiredFingerprint.equals(key)) {
 						fallback(true);
@@ -1024,12 +1036,18 @@ public final class FsMonitor {
 											Long.parseUnsignedLong(token)) >= 0
 							: sameMonitorInstance(token, records[0]);
 					noChanges &= sameInstance;
-					if (!sameContext || !sameInstance) {
+					// Index/HEAD changes invalidate a cached Status, but not the
+					// provider's filesystem delta. Keep its scope when the same
+					// provider/configuration still validates our previous token.
+					boolean sameFilesystem = sameContext
+							|| version == queryVersion
+									&& filesystem.equals(filesystemContext);
+					if (!sameFilesystem || !sameInstance) {
 						changedPaths = List.of("/"); //$NON-NLS-1$
 					}
 					trace.data("cache/hit", //$NON-NLS-1$
 							Boolean.toString(noChanges && sameContext));
-					Probe result = new Probe(key, context, records[0], noChanges && sameContext,
+					Probe result = new Probe(key, context, filesystem, records[0], noChanges && sameContext,
 							changedPaths, hasUntrackedCache, queryVersion);
 					result.invalidationScopeUnknown = scopeUnknown;
 					if (!storedQuery) {
@@ -1076,6 +1094,7 @@ public final class FsMonitor {
 				return;
 			}
 			fingerprint = probe.fingerprint;
+			filesystemContext = probe.filesystemContext;
 			token = probe.token;
 			version = probe.version;
 			pendingPaths = probe.followupPaths;
@@ -1148,13 +1167,58 @@ public final class FsMonitor {
 		return contextFingerprint(repo, isDaemonSetting(configured) ? null : executable.toPath());
 	}
 
+	private static String ruleFingerprint(DirCache index) throws Exception {
+		MessageDigest md = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
+		for (int i = 0; i < index.getEntryCount(); i++) {
+			DirCacheEntry entry = index.getEntry(i);
+			byte[] path = entry.getRawPath();
+			if (ruleName(path, ".gitattributes") || ruleName(path, ".gitignore") //$NON-NLS-1$ //$NON-NLS-2$
+					|| ruleName(path, ".gitmodules")) { //$NON-NLS-1$
+				// Indexed rules can change filesystem interpretation without
+				// a provider event. Preserve raw path identity and entry flags.
+				md.update(path);
+				md.update((byte) 0);
+				update(md, entry.getObjectId().name());
+				update(md, Integer.toString(entry.getRawMode()));
+				update(md, Integer.toString(entry.getStage()));
+				update(md, Boolean.toString(entry.isSkipWorkTree()));
+				update(md, Boolean.toString(entry.isAssumeValid()));
+			}
+		}
+		return HexFormat.of().formatHex(md.digest());
+	}
+
+	private static boolean ruleName(byte[] path, String name) {
+		int offset = path.length - name.length();
+		if (offset < 0 || offset > 0 && path[offset - 1] != '/') {
+			return false;
+		}
+		for (int i = 0; i < name.length(); i++) {
+			int c = path[offset + i] & 0xff;
+			if (c >= 'A' && c <= 'Z') {
+				c += 'a' - 'A';
+			}
+			if (c != name.charAt(i)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private record ContextFingerprint(String result, String filesystem) {
+	}
+
 	private static String contextFingerprint(Repository repo, Path executable) throws Exception {
+		return contextFingerprints(repo, executable).result();
+	}
+
+	private static ContextFingerprint contextFingerprints(Repository repo,
+			Path executable) throws Exception {
 		MessageDigest md = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
 		update(md, repo.getDirectory().getAbsolutePath());
 		update(md, repo.getWorkTree().getAbsolutePath());
 		update(md, repo.getIndexFile().getAbsolutePath());
 		ObjectId head = repo.resolve(Constants.HEAD);
-		update(md, head == null ? "unborn" : head.name()); //$NON-NLS-1$
 		SystemReader reader = SystemReader.getInstance();
 		// Reload inherited external config before comparing effective inputs.
 		reader.getUserConfig();
@@ -1190,7 +1254,10 @@ public final class FsMonitor {
 					: repo.getFS().resolve(null, attributes);
 			update(md, digest(path.toPath()));
 		}
-		return HexFormat.of().formatHex(md.digest());
+		String filesystem = HexFormat.of().formatHex(md.digest());
+		update(md, filesystem);
+		update(md, head == null ? "unborn" : head.name()); //$NON-NLS-1$
+		return new ContextFingerprint(HexFormat.of().formatHex(md.digest()), filesystem);
 	}
 
 	private static boolean isDaemonSetting(String value) {

@@ -313,6 +313,103 @@ public class FsMonitorTest extends RepositoryTestCase {
 	}
 
 	@Test
+	public void checkoutContextKeepsReportedScope() throws Exception {
+		configure(null);
+		try (Git git = Git.wrap(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			var base = git.commit().setMessage("base").call();
+			writeTrashFile("tracked", "next");
+			git.add().addFilepattern("tracked").call();
+			var target = git.commit().setMessage("target").call();
+			git.checkout().setName(base.name()).call();
+			reply("before\0");
+			FsMonitor.State state = new FsMonitor.State();
+			var first = state.query(db);
+			org.junit.Assert.assertNotNull(first);
+			equal(baseline(git), git.status().call());
+			state.remember(first);
+			reply("after\0tracked\0");
+			git.checkout().setName(target.name()).call();
+			var changed = state.query(db);
+			org.junit.Assert.assertNotNull(changed);
+			org.junit.Assert.assertFalse(changed.isUnchanged());
+			assertEquals(java.util.List.of("tracked"), changed.getChangedPaths());
+			equal(baseline(git), git.status().call());
+		}
+	}
+
+	@Test
+	public void refOnlyChangeKeepsEmptyMonitorScope() throws Exception {
+		configure(null);
+		try (Git git = Git.wrap(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			var base = git.commit().setMessage("base").call();
+			writeTrashFile("tracked", "next");
+			git.add().addFilepattern("tracked").call();
+			var target = git.commit().setMessage("target").call();
+			git.reset().setMode(org.eclipse.jgit.api.ResetCommand.ResetType.SOFT)
+					.setRef(base.name()).call();
+			reply("before\0");
+			FsMonitor.State state = new FsMonitor.State();
+			var first = state.query(db);
+			org.junit.Assert.assertNotNull(first);
+			state.remember(first);
+			git.reset().setMode(org.eclipse.jgit.api.ResetCommand.ResetType.SOFT)
+					.setRef(target.name()).call();
+			reply("after\0");
+			var changed = state.query(db);
+			org.junit.Assert.assertNotNull(changed);
+			org.junit.Assert.assertFalse(changed.isUnchanged());
+			assertTrue(changed.getChangedPaths().isEmpty());
+			equal(baseline(git), git.status().call());
+		}
+	}
+
+	@Test
+	public void indexedRulesStillRequireRootScope() throws Exception {
+		configure(null);
+		try (Git git = Git.wrap(db)) {
+			writeTrashFile("tracked", "base");
+			git.add().addFilepattern("tracked").call();
+			git.commit().setMessage("base").call();
+			for (String path : java.util.List.of(".gitattributes", ".gitignore")) {
+				reply("before\0");
+				FsMonitor.State state = new FsMonitor.State();
+				var first = state.query(db);
+				org.junit.Assert.assertNotNull(first);
+				state.remember(first);
+				writeTrashFile(path, path.equals(".gitignore") ? "ignored\n"
+						: "tracked -text\n");
+				git.add().addFilepattern(path).call();
+				reply("after\0");
+				var changed = state.query(db);
+				org.junit.Assert.assertNotNull(changed);
+				org.junit.Assert.assertFalse(changed.isUnchanged());
+				assertEquals(path, java.util.List.of("/"), changed.getChangedPaths());
+				equal(baseline(git), git.status().call());
+			}
+		}
+	}
+
+	@Test
+	public void providerConfigurationChangesStillRequireRootScope() throws Exception {
+		configure(null);
+		reply("before\0");
+		FsMonitor.State state = new FsMonitor.State();
+		var first = state.query(db);
+		org.junit.Assert.assertNotNull(first);
+		state.remember(first);
+		db.getConfig().setBoolean("core", null, "fileMode", false);
+		reply("after\0tracked\0");
+		var changed = state.query(db);
+		org.junit.Assert.assertNotNull(changed);
+		org.junit.Assert.assertFalse(changed.isUnchanged());
+		assertEquals(java.util.List.of("/"), changed.getChangedPaths());
+	}
+
+	@Test
 	public void indexAndHeadChangesInvalidateEvenWithoutFilesystemPaths()
 			throws Exception {
 		configure(null);

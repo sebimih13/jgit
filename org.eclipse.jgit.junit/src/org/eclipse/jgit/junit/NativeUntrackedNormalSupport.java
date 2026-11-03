@@ -169,6 +169,35 @@ public final class NativeUntrackedNormalSupport {
 	 */
 	public static Set<String> nativeStatus(Repository repository, String mode,
 			boolean reuse) throws Exception {
+		Set<String> paths = new HashSet<>();
+		for (String record : new String(
+				nativeStatusOutput(repository, mode, reuse),
+				StandardCharsets.UTF_8).split("\0")) {
+			if (!record.isEmpty()) {
+				assertTrue(record, record.startsWith("?? "));
+				assertTrue("Duplicate native path: " + record,
+						paths.add(record.substring(3)));
+			}
+		}
+		return paths;
+	}
+
+	/**
+	 * Capture all native normal/all porcelain records and optional UNTR reuse.
+	 *
+	 * @param repository
+	 *            disposable fixture
+	 * @param mode
+	 *            normal or all
+	 * @param reuse
+	 *            require zero native directory opens
+	 * @return NUL-delimited native porcelain, including tracked changes
+	 * @throws Exception
+	 *             on native failure or cache-reuse mismatch
+	 * @since 7.8
+	 */
+	public static byte[] nativeStatusOutput(Repository repository, String mode,
+			boolean reuse) throws Exception {
 		Path trace = repository.getDirectory().toPath()
 				.resolve("normal-publication.perf");
 		Path output = repository.getDirectory().toPath()
@@ -207,15 +236,6 @@ public final class NativeUntrackedNormalSupport {
 			assertEquals("Native must reuse Java-published records", 0,
 					Integer.parseInt(matcher.group(1)));
 		}
-		Set<String> paths = new HashSet<>();
-		for (String record : new String(Files.readAllBytes(output),
-				StandardCharsets.UTF_8).split("\0")) {
-			if (!record.isEmpty()) {
-				assertTrue(record, record.startsWith("?? "));
-				assertTrue("Duplicate native path: " + record,
-						paths.add(record.substring(3)));
-			}
-		}
-		return paths;
+		return Files.readAllBytes(output);
 	}
 }

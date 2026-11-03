@@ -125,10 +125,12 @@ final class UntrackedDirectoryListing {
 
 	static UntrackedDirectoryListing create(Repository repo, DirCache index,
 			boolean reportIgnored) {
+		String disabled = SystemReader.getInstance()
+				.getenv("GIT_DISABLE_UNTRACKED_CACHE"); //$NON-NLS-1$
 		if (repo == null || repo.isBare()
 				|| repo.getFS().getClass() != FS_POSIX.class
-				|| SystemReader.getInstance()
-						.getenv("GIT_DISABLE_UNTRACKED_CACHE") != null) { //$NON-NLS-1$
+				|| disabled != null && !Boolean.FALSE
+						.equals(UntrackedCacheConfig.parseBoolean(disabled))) {
 			return null;
 		}
 		try {
@@ -365,9 +367,15 @@ final class UntrackedDirectoryListing {
 			Directory node) throws IOException {
 		Boolean valid = directoryExcludesValid.get(path);
 		if (valid == null) {
-			valid = Boolean.valueOf(
-					matchesExclude(directory.resolve(Constants.DOT_GIT_IGNORE),
-							node.excludeOid));
+			byte[] bytes = readExclude(directory.resolve(Constants.DOT_GIT_IGNORE));
+			ObjectId sparseIgnore = bytes == null
+					? WorkingTreeIterator.indexedIgnore(index,
+							path.isEmpty() ? Constants.DOT_GIT_IGNORE
+									: path + "/" + Constants.DOT_GIT_IGNORE) //$NON-NLS-1$
+					: null;
+			valid = Boolean.valueOf(sparseIgnore != null
+					? sparseIgnore.equals(node.excludeOid)
+					: matchesExcludeContent(bytes, node.excludeOid));
 			directoryExcludesValid.put(path, valid);
 		}
 		return valid.booleanValue();
@@ -375,7 +383,10 @@ final class UntrackedDirectoryListing {
 
 	private static boolean matchesExclude(Path file, ObjectId expected)
 			throws IOException {
-		byte[] bytes = readExclude(file);
+		return matchesExcludeContent(readExclude(file), expected);
+	}
+
+	private static boolean matchesExcludeContent(byte[] bytes, ObjectId expected) {
 		return bytes == null ? ObjectId.zeroId().equals(expected)
 				: excludeId(bytes, false).equals(expected) || bytes.length != 0
 						&& excludeId(bytes, true).equals(expected);

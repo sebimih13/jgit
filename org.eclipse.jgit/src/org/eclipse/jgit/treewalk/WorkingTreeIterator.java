@@ -42,6 +42,7 @@ import org.eclipse.jgit.attributes.AttributesRule;
 import org.eclipse.jgit.attributes.FilterCommand;
 import org.eclipse.jgit.attributes.FilterCommandRegistry;
 import org.eclipse.jgit.diff.RawText;
+import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.dircache.DirCacheEntry;
 import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.errors.CorruptObjectException;
@@ -125,6 +126,8 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 
 	/** If there is a .gitignore file present, the parsed rules from it. */
 	private IgnoreNode ignoreNode;
+
+	private boolean ignoreNodeLoaded;
 
 	/**
 	 * cached clean filter command. Use a Ref in order to distinguish between
@@ -233,6 +236,10 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 	public void setDirCacheIterator(TreeWalk walk, int treeId) {
 		state.walk = walk;
 		state.dirCacheTree = treeId;
+		AbstractTreeIterator iterator = walk != null && treeId >= 0
+				&& treeId < walk.getTreeCount() ? walk.getTreeIterator(treeId) : null;
+		state.dirCache = iterator instanceof DirCacheIterator index
+				? index.getDirCache() : null;
 	}
 
 	/**
@@ -736,11 +743,40 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 	}
 
 	private IgnoreNode getIgnoreNode() throws IOException {
-		if (ignoreNode instanceof PerDirectoryIgnoreNode)
-			ignoreNode = ((PerDirectoryIgnoreNode) ignoreNode).load();
+		if (!ignoreNodeLoaded) {
+			IgnoreNode resolved = ignoreNode;
+			boolean absent = resolved == null
+					|| resolved instanceof RootIgnoreNode root && root.entry == null;
+			if (resolved instanceof PerDirectoryIgnoreNode directory)
+				resolved = directory.load();
+			if (absent && repository != null) {
+				String name = TreeWalk.pathOf(path, 0, pathOffset)
+						+ Constants.DOT_GIT_IGNORE;
+				ObjectId blob = indexedIgnore(state.dirCache, name);
+				if (blob != null) {
+					ObjectLoader loader = repository.open(blob, Constants.OBJ_BLOB);
+					// Match native dir.c's pattern-file limit.
+					if (loader.getSize() <= 100 * 1024 * 1024) {
+						IgnoreNode rules = new IgnoreNodeWithParent(resolved);
+						try (InputStream in = loader.openStream()) {
+							rules.parse(name, in);
+						}
+						if (!rules.getRules().isEmpty())
+							resolved = rules;
+					}
+				}
+			}
+			ignoreNode = resolved;
+			ignoreNodeLoaded = true;
+		}
 		return ignoreNode;
 	}
 
+	static ObjectId indexedIgnore(DirCache index, String name) {
+		DirCacheEntry entry = index == null ? null : index.getEntry(name);
+		return entry != null && entry.getStage() == 0 && entry.isSkipWorkTree()
+				? entry.getObjectId() : null;
+	}
 	/**
 	 * Retrieves the {@link org.eclipse.jgit.attributes.AttributesNode} for the
 	 * current entry.
@@ -1495,6 +1531,9 @@ public abstract class WorkingTreeIterator extends AbstractTreeIterator {
 
 		/** Position of the matching {@link DirCacheIterator}. */
 		int dirCacheTree = -1;
+
+		/** Associated index, including paths not at the walk's current entry. */
+		DirCache dirCache;
 
 		/** Whether the iterator shall walk ignored directories. */
 		boolean walkIgnored = false;

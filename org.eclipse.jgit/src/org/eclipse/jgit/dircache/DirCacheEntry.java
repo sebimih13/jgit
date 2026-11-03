@@ -101,10 +101,10 @@ public class DirCacheEntry {
 	private static final int UPDATE_NEEDED = 0x1;
 
 	/** (Possibly shared) header information storage. */
-	private final byte[] info;
+	private byte[] info;
 
 	/** First location within {@link #info} where our header starts. */
-	private final int infoOffset;
+	private int infoOffset;
 
 	/** Our encoded path name, from the root of the repository. */
 	final byte[] path;
@@ -326,9 +326,10 @@ public class DirCacheEntry {
 	 */
 	public DirCacheEntry(DirCacheEntry src) {
 		path = src.path;
-		info = new byte[INFO_LEN];
+		int length = src.isExtended() ? INFO_LEN_EXTENDED : INFO_LEN;
+		info = new byte[length];
 		infoOffset = 0;
-		System.arraycopy(src.info, src.infoOffset, info, 0, INFO_LEN);
+		System.arraycopy(src.info, src.infoOffset, info, 0, length);
 		fsMonitorOwner = src.fsMonitorOwner;
 	}
 
@@ -564,6 +565,14 @@ public class DirCacheEntry {
 	 */
 	public boolean isSkipWorkTree() {
 		return (getExtendedFlags() & SKIP_WORKTREE) != 0;
+	}
+
+	void clearSkipWorkTree() {
+		if (isExtended()) {
+			fsMonitorOwner = null;
+			NB.encodeInt16(info, infoOffset + P_FLAGS2,
+					(getExtendedFlags() & ~SKIP_WORKTREE) >>> 16);
+		}
 	}
 
 	/**
@@ -827,7 +836,14 @@ public class DirCacheEntry {
 		fsMonitorOwner = null;
 		int origflags = NB.decodeUInt16(info, infoOffset + P_FLAGS);
 		int newflags = NB.decodeUInt16(src.info, src.infoOffset + P_FLAGS);
-		System.arraycopy(src.info, src.infoOffset, info, infoOffset, INFO_LEN);
+		int length = src.isExtended() ? INFO_LEN_EXTENDED : INFO_LEN;
+		if (src.isExtended() && !isExtended()) {
+			// Entries read from disk can share a packed backing array. Growing
+			// this entry in place would overwrite the following entry.
+			info = new byte[INFO_LEN_EXTENDED];
+			infoOffset = 0;
+		}
+		System.arraycopy(src.info, src.infoOffset, info, infoOffset, length);
 		final int pLen = origflags & NAME_MASK;
 		final int SHIFTED_STAGE_MASK = 0x3 << 12;
 		final int pStageShifted;
