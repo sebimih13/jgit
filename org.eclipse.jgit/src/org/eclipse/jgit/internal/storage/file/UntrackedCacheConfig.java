@@ -73,6 +73,18 @@ public final class UntrackedCacheConfig {
 	}
 
 	/**
+	 * Whether the environment bypasses untracked-cache reuse and publication.
+	 * Invalid values conservatively disable caching, as in traversal fallback.
+	 *
+	 * @return true when untracked caching is disabled by the environment
+	 */
+	public static boolean isDisabledByEnvironment() {
+		String value = SystemReader.getInstance()
+				.getenv("GIT_DISABLE_UNTRACKED_CACHE"); //$NON-NLS-1$
+		return value != null && !Boolean.FALSE.equals(parseBoolean(value));
+	}
+
+	/**
 	 * Apply the policy when an index is written. A newly created cache has no
 	 * valid traversal data; directory/stat/ignore validation remains mandatory.
 	 *

@@ -24,10 +24,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
-import java.util.Set;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.TreeSet;
 
 import org.eclipse.jgit.dircache.DirCache;
@@ -94,6 +94,9 @@ public final class FsMonitor {
 	 */
 	public static boolean isUntrackedCacheEnabled(Repository repository,
 			Probe probe) {
+		if (UntrackedCacheConfig.isDisabledByEnvironment()) {
+			return false;
+		}
 		UntrackedCacheConfig.Mode mode = repository.getConfig()
 				.get(UntrackedCacheConfig.KEY).getMode();
 		if (mode != UntrackedCacheConfig.Mode.KEEP) {

@@ -17,9 +17,9 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.HashSet;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -29,9 +29,9 @@ import org.eclipse.jgit.internal.storage.file.UntrackedCache;
 import org.eclipse.jgit.internal.storage.file.UntrackedCache.Directory;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.lib.Constants;
-import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ObjectInserter;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.util.FS_POSIX;
 import org.eclipse.jgit.util.SystemReader;
 
@@ -125,12 +125,9 @@ final class UntrackedDirectoryListing {
 
 	static UntrackedDirectoryListing create(Repository repo, DirCache index,
 			boolean reportIgnored) {
-		String disabled = SystemReader.getInstance()
-				.getenv("GIT_DISABLE_UNTRACKED_CACHE"); //$NON-NLS-1$
 		if (repo == null || repo.isBare()
 				|| repo.getFS().getClass() != FS_POSIX.class
-				|| disabled != null && !Boolean.FALSE
-						.equals(UntrackedCacheConfig.parseBoolean(disabled))) {
+				|| UntrackedCacheConfig.isDisabledByEnvironment()) {
 			return null;
 		}
 		try {

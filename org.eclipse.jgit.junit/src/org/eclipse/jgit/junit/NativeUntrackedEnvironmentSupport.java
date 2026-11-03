@@ -9,6 +9,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,6 +19,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+
 import org.eclipse.jgit.dircache.DirCache;
 import org.eclipse.jgit.lib.Repository;
 
@@ -71,6 +73,27 @@ public final class NativeUntrackedEnvironmentSupport {
 				StandardCopyOption.REPLACE_EXISTING,
 				StandardCopyOption.COPY_ATTRIBUTES);
 		assertNull(repository.readDirCache().getUntrackedCache());
+	}
+
+	/**
+	 * Install a quiet v2 provider to exercise whole-result cache eligibility.
+	 * Mutations made while untracked caching is disabled must still be found.
+	 *
+	 * @param repository disposable fixture
+	 * @throws Exception on hook setup failure
+	 * @since 7.8
+	 */
+	public static void enableQuietMonitor(Repository repository) throws Exception {
+		org.junit.Assume.assumeFalse(
+				org.eclipse.jgit.util.SystemReader.getInstance().isWindows());
+		Path hook = repository.getDirectory().toPath().resolve("quiet-monitor");
+		Files.writeString(hook,
+				"#!/bin/sh\n[ \"$1\" = 2 ] || exit 2\nprintf 'environment-quiet\\000'\n");
+		assertTrue(hook.toFile().setExecutable(true));
+		repository.getConfig().setString("core", null, "fsmonitor", hook.toString());
+		repository.getConfig().setInt("core", null, "fsmonitorHookVersion", 2);
+		repository.getConfig().setBoolean("jgit", null, "fsmonitorCache", true);
+		repository.getConfig().save();
 	}
 
 	/**

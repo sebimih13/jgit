@@ -28,8 +28,8 @@ import org.eclipse.jgit.internal.storage.file.UntrackedCache.Directory;
 import org.eclipse.jgit.internal.storage.file.UntrackedCacheConfig;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
-import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.ProgressMonitor;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.util.FS_POSIX;
 import org.eclipse.jgit.util.FsMonitor;
 import org.eclipse.jgit.util.SystemReader;
@@ -91,8 +91,6 @@ final class UntrackedCacheScan {
 	}
 
 	private static boolean eligible(Repository repository) {
-		String disabled = SystemReader.getInstance()
-				.getenv("GIT_DISABLE_UNTRACKED_CACHE"); //$NON-NLS-1$
 		if (repository.isBare()
 				|| repository.getFS().getClass() != FS_POSIX.class
 				|| FsMonitor.isConfigured(repository)
@@ -104,8 +102,7 @@ final class UntrackedCacheScan {
 								.getMode() != UntrackedCacheConfig.Mode.REMOVE
 				|| repository.getConfig().get(WorkingTreeOptions.KEY)
 						.isDirNoGitLinks()
-				|| disabled != null && !Boolean.FALSE
-						.equals(UntrackedCacheConfig.parseBoolean(disabled))) {
+				|| UntrackedCacheConfig.isDisabledByEnvironment()) {
 			return false;
 		}
 		String optional = SystemReader.getInstance()

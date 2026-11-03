@@ -5,20 +5,23 @@
 package org.eclipse.jgit.treewalk;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
-import java.util.List;
-import java.util.HashSet;
-import java.util.Set;
+
 import java.nio.file.Files;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.Status;
 import org.eclipse.jgit.junit.NativeUntrackedEnvironmentSupport;
 import org.eclipse.jgit.junit.NativeUntrackedNormalSupport;
+import org.eclipse.jgit.junit.RepositoryTestCase;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
-
-import org.eclipse.jgit.junit.RepositoryTestCase;
-import org.eclipse.jgit.api.Git;
-import org.eclipse.jgit.api.Status;
 
 @RunWith(Parameterized.class)
 public class UntrackedCacheEnvironmentTest extends RepositoryTestCase {
@@ -85,5 +88,38 @@ public class UntrackedCacheEnvironmentTest extends RepositoryTestCase {
 		assertTrue(status.getMissing().isEmpty());
 		assertTrue(status.getIgnoredNotInIndex().isEmpty());
 		assertTrue(status.getConflicting().isEmpty());
+	}
+
+	@Test
+	public void environmentPolicyAppliesToRetainedMonitorResults()
+			throws Exception {
+		NativeUntrackedEnvironmentSupport.prepare(db, many);
+		NativeUntrackedEnvironmentSupport.enableQuietMonitor(db);
+		String previous = mockSystemReader.getenv("GIT_DISABLE_UNTRACKED_CACHE");
+		try (Git git = Git.wrap(db)) {
+			mockSystemReader.setProperty("GIT_DISABLE_UNTRACKED_CACHE", "0");
+			git.status().setUpdateUntrackedCache(false).call();
+			Status warm = git.status().setUpdateUntrackedCache(false).call();
+			assertSame(warm, git.status().setUpdateUntrackedCache(false).call());
+			mockSystemReader.setProperty("GIT_DISABLE_UNTRACKED_CACHE", value);
+			Status current = git.status().setUpdateUntrackedCache(false).call();
+			if (enabled) {
+				assertSame(warm, current);
+			} else {
+				assertNotSame(warm, current);
+			}
+			mockSystemReader.setProperty("GIT_DISABLE_UNTRACKED_CACHE", "1");
+			NativeUntrackedNormalSupport.write(db, "dthree/later", "later\n");
+			Set<String> expected = new HashSet<>(
+					Set.of("three", "dtwo/two", "dthree/three", "dthree/later"));
+			check(git.status().setUpdateUntrackedCache(false).call(), expected);
+			assertEquals(expected, NativeUntrackedNormalSupport.nativeStatus(db, "all", false));
+			Files.delete(db.getWorkTree().toPath().resolve("dthree/three"));
+			expected.remove("dthree/three");
+			check(git.status().setUpdateUntrackedCache(false).call(), expected);
+			assertEquals(expected, NativeUntrackedNormalSupport.nativeStatus(db, "all", false));
+		} finally {
+			mockSystemReader.setProperty("GIT_DISABLE_UNTRACKED_CACHE", previous);
+		}
 	}
 }
