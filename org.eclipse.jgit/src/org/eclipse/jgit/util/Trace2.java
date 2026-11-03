@@ -10,6 +10,7 @@
 package org.eclipse.jgit.util;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.Writer;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -22,13 +23,16 @@ import java.util.Map;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.eclipse.jgit.fnmatch.FileNameMatcher;
 import org.eclipse.jgit.internal.trace2.Trace2Destination;
 import org.eclipse.jgit.internal.trace2.Trace2SystemConfig;
 import org.eclipse.jgit.internal.trace2.Trace2Target;
 import org.eclipse.jgit.internal.trace2.Trace2Target.Format;
-import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.Config;
-import org.eclipse.jgit.fnmatch.FileNameMatcher;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.ObjectId;
+import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.Repository;
 
 /**
  * Trace2 sessions, thread-local regions and independent output targets.
@@ -305,6 +309,11 @@ public final class Trace2 implements AutoCloseable {
 	}
 
 	/**
+	 * Open a command scope and, when tracing is enabled and a repository is
+	 * provided, record its starting HEAD as region and per-repository process
+	 * data. The process snapshot is replaced by the next command on that
+	 * repository; individual region snapshots remain independent.
+	 *
 	 * @param repository
 	 *            repository or null
 	 * @param command
@@ -329,7 +338,41 @@ public final class Trace2 implements AutoCloseable {
 			scope.command = true;
 		}
 		scope.data("origin", origin); //$NON-NLS-1$
+		reportHead(repository, scope);
 		return scope;
+	}
+
+	private void reportHead(Repository repository, Scope scope) {
+		if (repository == null || !scope.isEnabled()) {
+			return;
+		}
+		Map<String, Object> head;
+		try {
+			// Read HEAD once so the branch and object ID describe the same
+			// resolved ref, including detached and unborn HEADs.
+			Ref ref = repository.exactRef(Constants.HEAD);
+			ObjectId commit = ref == null ? null : ref.getObjectId();
+			head = fields("branch", ref != null && ref.isSymbolic() //$NON-NLS-1$
+					? ref.getLeaf().getName() : null,
+					"commit", commit == null ? null : commit.name()); //$NON-NLS-1$
+		} catch (IOException | RuntimeException failure) {
+			// Do not fail the operation or leave stale metadata looking like
+			// a successful snapshot when an optional HEAD lookup fails.
+			head = fields("branch", null, "commit", null, //$NON-NLS-1$ //$NON-NLS-2$
+					"unavailable", Boolean.TRUE); //$NON-NLS-1$
+		}
+		scope.dataJson("head", head); //$NON-NLS-1$
+		if (scope.repo != 0) {
+			// Process data has one value per (category,key). Use the repo ID
+			// as key to keep repositories in an embedded session independent.
+			// Nesting 1 targets process data even on a background worker.
+			double elapsed = elapsed(start);
+			emit("data_json", fields("category", "repository", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+					"key", Integer.toString(scope.repo), "value", head, //$NON-NLS-1$ //$NON-NLS-2$
+					"repo", Integer.valueOf(scope.repo), "nesting", //$NON-NLS-1$ //$NON-NLS-2$
+					Integer.valueOf(1), "t_abs", Double.valueOf(elapsed), //$NON-NLS-1$
+					"t_rel", Double.valueOf(elapsed))); //$NON-NLS-1$
+		}
 	}
 
 	/**
