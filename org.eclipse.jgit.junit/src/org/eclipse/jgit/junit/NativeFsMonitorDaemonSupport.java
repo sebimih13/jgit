@@ -11,6 +11,7 @@ package org.eclipse.jgit.junit;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
+import static org.junit.Assume.assumeTrue;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,12 +30,23 @@ import org.eclipse.jgit.util.SystemReader;
 public final class NativeFsMonitorDaemonSupport implements AutoCloseable {
 	private final Repository repository;
 
-	private NativeFsMonitorDaemonSupport(Repository repository) {
+	private final String git;
+
+	private final String testTool;
+
+	private NativeFsMonitorDaemonSupport(Repository repository, String git,
+			String testTool) {
 		this.repository = repository;
+		this.git = git;
+		this.testTool = testTool;
 	}
 
 	/**
-	 * Start the pinned native daemon on a disposable repository.
+	 * Start the pinned native daemon on a disposable repository. Requires C
+	 * Git's test-tool, either beside the configured
+	 * {@code jgit.test.gitExecutable} in {@code t/helper}, or supplied through
+	 * {@code jgit.test.gitTestTool}. Without an installed helper this optional
+	 * interoperability fixture is unavailable; no daemon is started.
 	 * 
 	 * @param repository
 	 *            disposable repository
@@ -46,9 +58,22 @@ public final class NativeFsMonitorDaemonSupport implements AutoCloseable {
 	public static NativeFsMonitorDaemonSupport start(Repository repository)
 			throws Exception {
 		assumeFalse(SystemReader.getInstance().isWindows());
+		String git = System.getProperty("jgit.test.gitExecutable", "git");
+		String configuredHelper = System.getProperty("jgit.test.gitTestTool");
+		String testTool = configuredHelper != null ? configuredHelper
+				: Path.of(git).toAbsolutePath().getParent()
+						.resolve("t/helper/test-tool").toString();
+		String prerequisite = "Native daemon interoperability requires C Git's "
+				+ "test-tool; set jgit.test.gitTestTool: " + testTool;
+		if (configuredHelper != null) {
+			assertTrue(prerequisite, Files.isExecutable(Path.of(testTool)));
+		} else {
+			assumeTrue(prerequisite, Files.isExecutable(Path.of(testTool)));
+		}
 		repository.getConfig().setBoolean("core", null, "fsmonitor", true);
 		repository.getConfig().save();
-		var daemon = new NativeFsMonitorDaemonSupport(repository);
+		var daemon = new NativeFsMonitorDaemonSupport(repository, git,
+				testTool);
 		try {
 			daemon.run(false, "fsmonitor--daemon", "start",
 					"--start-timeout=5");
@@ -101,11 +126,7 @@ public final class NativeFsMonitorDaemonSupport implements AutoCloseable {
 
 	private byte[] execute(boolean helper, boolean requireSuccess,
 			String... arguments) throws Exception {
-		String git = System.getProperty("jgit.test.gitExecutable", "git");
-		String executable = helper
-				? Path.of(git).toAbsolutePath().getParent()
-						.resolve("t/helper/test-tool").toString()
-				: git;
+		String executable = helper ? testTool : git;
 		List<String> command = new ArrayList<>(List.of(executable, "-C",
 				repository.getWorkTree().getAbsolutePath()));
 		command.addAll(List.of(arguments));
