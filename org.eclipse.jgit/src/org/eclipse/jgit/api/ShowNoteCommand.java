@@ -21,6 +21,7 @@ import org.eclipse.jgit.notes.NoteMap;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Show an object note.
@@ -46,6 +47,23 @@ public class ShowNoteCommand extends GitCommand<Note> {
 
 	@Override
 	public Note call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"notes", "jgit.api.ShowNoteCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Note result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Note callWithTrace() throws GitAPIException {
 		checkCallable();
 		NoteMap map = NoteMap.newEmptyMap();
 		RevCommit notesCommit = null;

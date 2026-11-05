@@ -53,6 +53,7 @@ import org.eclipse.jgit.treewalk.filter.AndTreeFilter;
 import org.eclipse.jgit.treewalk.filter.IndexDiffFilter;
 import org.eclipse.jgit.treewalk.filter.SkipWorkTreeFilter;
 import org.eclipse.jgit.util.FileUtils;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Command class to stash changes in the working directory and index in a
@@ -215,6 +216,23 @@ public class StashCreateCommand extends GitCommand<RevCommit> {
 	 */
 	@Override
 	public RevCommit call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"stash", "jgit.api.StashCreateCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				RevCommit result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private RevCommit callWithTrace() throws GitAPIException {
 		checkCallable();
 
 		List<String> deletedFiles = new ArrayList<>();

@@ -326,6 +326,9 @@ class PushProcess {
 						update.getRemoteName()));
 			}
 		}
+		if (hadMatch && result.isEmpty()) {
+			throw new TransportException(JGitText.get().pushNoMatchingRefs);
+		}
 		return result;
 	}
 

@@ -21,6 +21,7 @@ import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ReflogEntry;
 import org.eclipse.jgit.lib.ReflogReader;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * The reflog command
@@ -64,6 +65,24 @@ public class ReflogCommand extends GitCommand<Collection<ReflogEntry>> {
 	 */
 	@Override
 	public Collection<ReflogEntry> call() throws GitAPIException,
+			InvalidRefNameException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"reflog", "jgit.api.ReflogCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Collection<ReflogEntry> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Collection<ReflogEntry> callWithTrace() throws GitAPIException,
 			InvalidRefNameException {
 		checkCallable();
 

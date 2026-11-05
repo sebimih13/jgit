@@ -1,0 +1,576 @@
+/*
+ * Copyright (C) 2026, and others
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the Eclipse Distribution License v. 1.0 which is available at
+ * https://www.eclipse.org/org/documents/edl-v10.php.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+package org.eclipse.jgit.junit;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.treewalk.TreeWalk;
+import org.eclipse.jgit.util.FS;
+import org.eclipse.jgit.util.FS_POSIX;
+import org.junit.Assume;
+import org.junit.Before;
+import org.junit.Test;
+
+/**
+ * Standalone commit scenarios from C Git t7503 and the commit hook contracts.
+ * Both adapters execute their actual commit command against the staged index.
+ *
+ * @since 7.3
+ */
+public abstract class CommitHookTestCase extends RepositoryTestCase {
+	/** Repository-relative directory of the requested commit invocation. */
+	protected String hookPrefix = "";
+
+	/** Commit preceding the tested operation. */
+	protected RevCommit initial;
+
+	/**
+	 * Commit the staged index using the adapter's operation.
+	 *
+	 * @return resulting commit
+	 * @throws Exception
+	 *             if the operation fails
+	 */
+	protected abstract RevCommit commitStaged() throws Exception;
+
+	/**
+	 * Commit while bypassing pre-commit and commit-msg verification.
+	 *
+	 * @return resulting commit
+	 * @throws Exception
+	 *             if the adapter cannot execute the operation
+	 */
+	protected RevCommit commitWithoutVerification() throws Exception {
+		throw new UnsupportedOperationException();
+	}
+
+	/**
+	 * Commit with a selected author, optionally amending HEAD.
+	 *
+	 * @param author
+	 *            author override; null retains the adapter's default
+	 * @param amend
+	 *            whether to amend the existing commit
+	 * @return resulting commit
+	 * @throws Exception
+	 *             if the operation fails
+	 */
+	protected abstract RevCommit commitAs(PersonIdent author, boolean amend)
+			throws Exception;
+
+	/**
+	 * Prepare the parent commit and staged changes before installing hooks.
+	 *
+	 * @throws Exception
+	 *             if setup fails
+	 */
+	@Before
+	public void prepareCommitHooks() throws Exception {
+		Assume.assumeTrue(FS.DETECTED instanceof FS_POSIX);
+		try (Git git = Git.wrap(db)) {
+			writeTrashFile("file", "root\n");
+			git.add().addFilepattern("file").call();
+			initial = git.commit().setMessage("zeroth").call();
+			writeTrashFile("file", "foo\n");
+			git.add().addFilepattern("file").call();
+		}
+	}
+
+	/**
+	 * Install an executable hook.
+	 *
+	 * @param name
+	 *            hook name
+	 * @param body
+	 *            shell script body
+	 * @return script path
+	 * @throws Exception
+	 *             if installation fails
+	 */
+	protected Path hook(String name, String body) throws Exception {
+		Path path = db.getDirectory().toPath().resolve("hooks").resolve(name);
+		Files.createDirectories(path.getParent());
+		// Native commit may leave GIT_DIR unset when it discovers .git.
+		Files.writeString(path, "#!/bin/sh\nGIT_DIR=${GIT_DIR:-.git}\n" + body);
+		assertTrue(FS.DETECTED.setExecute(path.toFile(), true));
+		return path;
+	}
+
+	private String records() throws Exception {
+		return Files
+				.readString(db.getDirectory().toPath().resolve("actual-hooks"));
+	}
+
+	private String record(String name) {
+		return "echo " + name + " >>\"$GIT_DIR/actual-hooks\"\n";
+	}
+
+	private void rejected() throws Exception {
+		try {
+			commitStaged();
+			fail("Hook must reject the commit");
+		} catch (Exception expected) {
+			assertEquals(initial, db.resolve(Constants.HEAD));
+		}
+		assertEquals("foo\n",
+				Files.readString(db.getWorkTree().toPath().resolve("file")));
+		try (Git git = Git.wrap(db)) {
+			assertEquals(java.util.Set.of("file"),
+					git.status().call().getChanged());
+		}
+	}
+
+	/**
+	 * Verify commit with no installed hooks.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void noHookCommitsStagedChanges() throws Exception {
+		assertEquals(initial, commitStaged().getParent(0));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("actual-hooks")));
+	}
+
+	/**
+	 * Verify a successful pre-commit hook is run exactly once.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void successfulPreCommitRunsOnce() throws Exception {
+		hook("pre-commit", record("pre-commit"));
+		assertEquals(initial, commitStaged().getParent(0));
+		assertEquals("pre-commit\n", records());
+	}
+
+	/**
+	 * Verify rejection preserves the parent and staged contents.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void failingPreCommitStopsLaterHooks() throws Exception {
+		hook("pre-commit", record("pre-commit-failing-hook") + "exit 1\n");
+		hook("commit-msg", record("commit-msg"));
+		hook("post-commit", record("post-commit"));
+		rejected();
+		assertEquals("pre-commit-failing-hook\n", records());
+	}
+
+	/**
+	 * Verify non-executable scripts do not reject the operation.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void nonExecutablePreCommitIsSkipped() throws Exception {
+		Path script = hook("pre-commit", record("non-exec") + "exit 1\n");
+		assertTrue(FS.DETECTED.setExecute(script.toFile(), false));
+		assertEquals(initial, commitStaged().getParent(0));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("actual-hooks")));
+	}
+
+	/**
+	 * Verify the complete hook order around a successful commit.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void commitHooksRunInOrder() throws Exception {
+		for (String name : java.util.List.of("pre-commit", "prepare-commit-msg",
+				"commit-msg", "post-commit")) {
+			hook(name, record(name));
+		}
+		commitStaged();
+		assertEquals(
+				"pre-commit\nprepare-commit-msg\ncommit-msg\npost-commit\n",
+				records());
+	}
+
+	/**
+	 * Verify pre-commit has zero arguments and empty stdin.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void preCommitReceivesNoArgumentsAndEmptyInput() throws Exception {
+		hook("pre-commit",
+				"test \"$#\" = 0 || exit 11\n"
+						+ "cat >\"$GIT_DIR/hook.stdin\"\n"
+						+ "test ! -s \"$GIT_DIR/hook.stdin\" || exit 12\n"
+						+ "test \"$GIT_EDITOR\" = : || exit 13\n");
+		commitStaged();
+		assertEquals(0,
+				Files.size(db.getDirectory().toPath().resolve("hook.stdin")));
+	}
+
+	/**
+	 * Verify pre-commit sees the staged version of the tracked file.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void preCommitSeesStagedSnapshot() throws Exception {
+		hook("pre-commit", "git show :file >\"$GIT_DIR/hook.index\"\n");
+		commitStaged();
+		assertEquals("foo\n", Files
+				.readString(db.getDirectory().toPath().resolve("hook.index")));
+	}
+
+	/**
+	 * Verify index changes made by pre-commit enter the committed tree.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void preCommitCanStageAdditionalChanges() throws Exception {
+		hook("pre-commit", "echo injected >injected\ngit add injected\n");
+		RevCommit commit = commitStaged();
+		try (TreeWalk tree = TreeWalk.forPath(db, "injected",
+				commit.getTree())) {
+			assertNotNull(tree);
+			assertEquals("injected\n",
+					new String(db.open(tree.getObjectId(0)).getBytes(),
+							java.nio.charset.StandardCharsets.UTF_8));
+		}
+	}
+
+	/**
+	 * Verify a message-hook rejection prevents post-commit.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void failingCommitMessageStopsPostCommit() throws Exception {
+		hook("pre-commit", record("pre-commit"));
+		hook("commit-msg", record("commit-msg") + "exit 7\n");
+		hook("post-commit", record("post-commit"));
+		rejected();
+		assertEquals("pre-commit\ncommit-msg\n", records());
+	}
+
+	/**
+	 * Verify post-commit failure cannot undo the commit.
+	 *
+	 * @throws Exception
+	 *             if setup or command fails
+	 */
+	@Test
+	public void failingPostCommitDoesNotRejectCommit() throws Exception {
+		hook("post-commit", record("post-commit") + "exit 7\n");
+		RevCommit commit = commitStaged();
+		assertEquals(commit, db.resolve(Constants.HEAD));
+		assertEquals(initial, commit.getParent(0));
+		assertEquals("post-commit\n", records());
+	}
+
+	/**
+	 * Verify bypass succeeds without installed hooks.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifyWithNoHookCommits() throws Exception {
+		assertEquals(initial, commitWithoutVerification().getParent(0));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("actual-hooks")));
+	}
+
+	/**
+	 * Verify successful verification hooks are bypassed.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifySkipsSuccessfulPreCommit() throws Exception {
+		bypassPreCommit(0, true);
+	}
+
+	/**
+	 * Verify failed verification hooks are bypassed.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifySkipsFailingPreCommit() throws Exception {
+		bypassPreCommit(1, true);
+	}
+
+	/**
+	 * Verify bypass also succeeds with a non-executable script.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifyWithNonExecutablePreCommit() throws Exception {
+		bypassPreCommit(1, false);
+	}
+
+	private void bypassPreCommit(int code, boolean executable)
+			throws Exception {
+		Path script = hook("pre-commit",
+				record("unexpected") + "exit " + code + "\n");
+		assertTrue(FS.DETECTED.setExecute(script.toFile(), executable));
+		assertEquals(initial, commitWithoutVerification().getParent(0));
+		assertFalse(Files
+				.exists(db.getDirectory().toPath().resolve("actual-hooks")));
+	}
+
+	/**
+	 * Verify preparation and notification remain enabled under bypass.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void noVerifyStillPreparesAndNotifies() throws Exception {
+		hook("pre-commit", record("unexpected-pre-commit") + "exit 7\n");
+		hook("commit-msg", record("unexpected-commit-msg") + "exit 7\n");
+		hook("prepare-commit-msg", record("prepare-commit-msg")
+				+ "printf 'prepared message\\n' >\"$1\"\n");
+		hook("post-commit", record("post-commit"));
+		RevCommit commit = commitWithoutVerification();
+		assertEquals(initial, commit.getParent(0));
+		assertEquals("prepared message\n", commit.getFullMessage());
+		assertEquals("prepare-commit-msg\npost-commit\n", records());
+	}
+
+	/**
+	 * Port t7503's rejecting/default and accepting explicit-author sequence.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void requiredAuthorRejectsWrongIdentityThenAcceptsSelectedAuthor()
+			throws Exception {
+		hook("pre-commit", record("check-author")
+				+ "test \"$GIT_AUTHOR_NAME\" = 'New Author' && "
+				+ "test \"$GIT_AUTHOR_EMAIL\" = newauthor@example.com\n");
+		try {
+			commitAs(null, false);
+			fail("The hook must reject the wrong author");
+		} catch (Exception expected) {
+			assertEquals(initial, db.resolve(Constants.HEAD));
+		}
+		RevCommit commit = commitAs(
+				new PersonIdent("New Author", "newauthor@example.com"), false);
+		assertEquals("New Author", commit.getAuthorIdent().getName());
+		assertEquals("newauthor@example.com",
+				commit.getAuthorIdent().getEmailAddress());
+		assertEquals("check-author\ncheck-author\n", records());
+	}
+
+	/**
+	 * All commit hooks see the exact identity/date written to the commit.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void selectedAuthorIsVisibleToEveryCommitHook() throws Exception {
+		for (String name : java.util.List.of("pre-commit", "prepare-commit-msg",
+				"commit-msg", "post-commit")) {
+			hook(name, authorRecord(name));
+		}
+		RevCommit commit = commitAs(
+				new PersonIdent("New Author", "newauthor@example.com"), false);
+		assertAuthorRecords(commit, "pre-commit", "prepare-commit-msg",
+				"commit-msg", "post-commit");
+	}
+
+	/**
+	 * Amend exports the retained original author, including its date.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void amendExportsRetainedAuthorToVerificationAndRewrite()
+			throws Exception {
+		hook("pre-commit", authorRecord("pre-commit"));
+		hook("post-rewrite", authorRecord("post-rewrite"));
+		RevCommit commit = commitAs(null, true);
+		assertEquals(initial.getAuthorIdent().toExternalString(),
+				commit.getAuthorIdent().toExternalString());
+		assertAuthorRecords(commit, "pre-commit", "post-rewrite");
+	}
+
+	/**
+	 * Configured hooks receive the same author environment as script hooks.
+	 *
+	 * @throws Exception
+	 *             if setup or operation fails
+	 */
+	@Test
+	public void configuredPreCommitReceivesSelectedAuthor() throws Exception {
+		Path command = hook("author-check", authorRecord("configured"));
+		db.getConfig().setString("hook", "author", "event", "pre-commit");
+		db.getConfig().setString("hook", "author", "command",
+				"'" + command.toString().replace("'", "'\"'\"'") + "'");
+		db.getConfig().save();
+		RevCommit commit = commitAs(
+				new PersonIdent("New Author", "newauthor@example.com"), false);
+		assertAuthorRecords(commit, "configured");
+	}
+
+	private String authorRecord(String name) {
+		return "printf '%s|%s|%s|%s\\n' '" + name
+				+ "' \"$GIT_AUTHOR_NAME\" \"$GIT_AUTHOR_EMAIL\" \"$GIT_AUTHOR_DATE\""
+				+ " >>\"$GIT_DIR/actual-hooks\"\n";
+	}
+
+	private void assertAuthorRecords(RevCommit commit, String... names)
+			throws Exception {
+		PersonIdent author = commit.getAuthorIdent();
+		StringBuilder zone = new StringBuilder();
+		PersonIdent.appendTimezone(zone, author.getTimeZoneOffset());
+		String value = author.getName() + "|" + author.getEmailAddress() + "|@"
+				+ author.getWhenAsInstant().getEpochSecond() + " " + zone
+				+ "\n";
+		StringBuilder expected = new StringBuilder();
+		for (String name : names) {
+			expected.append(name).append('|').append(value);
+		}
+		assertEquals(expected.toString(), records());
+	}
+
+	/**
+	 * Root invocations export an explicitly empty prefix to every commit hook.
+	 * @throws Exception if setup or operation fails
+	 */
+	@Test
+	public void rootInvocationExportsEmptyPrefix() throws Exception {
+		for (String name : java.util.List.of("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit")) {
+			hook(name, "test \"${GIT_PREFIX+x}\" = x || exit 11\n"
+					+ "test -z \"$GIT_PREFIX\" || exit 12\n" + record(name));
+		}
+		commitStaged();
+		assertEquals("pre-commit\nprepare-commit-msg\ncommit-msg\npost-commit\n", records());
+	}
+
+	/**
+	 * Port t7503's successful hook requiring GIT_PREFIX=success/.
+	 * @throws Exception if setup or operation fails
+	 */
+	@Test
+	public void hookRequiringInvocationPrefixSucceeds() throws Exception {
+		hookPrefix = "success/";
+		Files.createDirectories(db.getWorkTree().toPath().resolve(hookPrefix));
+		hook("pre-commit", prefixRecord() + "test \"$GIT_PREFIX\" = success/\n");
+		assertEquals(initial, commitStaged().getParent(0));
+		assertEquals("success/\n", records());
+	}
+
+	/**
+	 * Port t7503's rejecting hook invoked from fail/.
+	 * @throws Exception if setup or operation fails
+	 */
+	@Test
+	public void hookRequiringDifferentInvocationPrefixRejects() throws Exception {
+		hookPrefix = "fail/";
+		Files.createDirectories(db.getWorkTree().toPath().resolve(hookPrefix));
+		hook("pre-commit", prefixRecord() + "test \"$GIT_PREFIX\" = success/\n");
+		rejected();
+		assertEquals("fail/\n", records());
+	}
+
+	/**
+	 * Prefix data with spaces is preserved while hooks run at the worktree root.
+	 * @throws Exception if setup or operation fails
+	 */
+	@Test
+	public void nestedInvocationPrefixDoesNotChangeHookWorkingDirectory() throws Exception {
+		hookPrefix = "with spaces/nested/";
+		Files.createDirectories(db.getWorkTree().toPath().resolve(hookPrefix));
+		hook("pre-commit", prefixRecord()
+				+ "test -f file || exit 11\n"
+				+ "test \"$GIT_PREFIX\" = 'with spaces/nested/' || exit 12\n");
+		commitStaged();
+		assertEquals("with spaces/nested/\n", records());
+	}
+
+	/**
+	 * Bypassing verification retains invocation context for preparation/notification.
+	 * @throws Exception if setup or operation fails
+	 */
+	@Test
+	public void bypassRetainsInvocationPrefixForRemainingHooks() throws Exception {
+		hookPrefix = "success/";
+		Files.createDirectories(db.getWorkTree().toPath().resolve(hookPrefix));
+		hook("pre-commit", "exit 7\n");
+		hook("commit-msg", "exit 7\n");
+		hook("prepare-commit-msg", prefixRecord());
+		hook("post-commit", prefixRecord());
+		commitWithoutVerification();
+		assertEquals("success/\nsuccess/\n", records());
+	}
+
+	/**
+	 * Configured verification commands retain the selected invocation context.
+	 * @throws Exception if setup or operation fails
+	 */
+	@Test
+	public void configuredPreCommitReceivesInvocationPrefix() throws Exception {
+		hookPrefix = "success/";
+		Files.createDirectories(db.getWorkTree().toPath().resolve(hookPrefix));
+		Path script = hook("prefix-check", prefixRecord() + "test \"$GIT_PREFIX\" = success/\n");
+		db.getConfig().setString("hook", "prefix", "event", "pre-commit");
+		db.getConfig().setString("hook", "prefix", "command", "'" + script.toString().replace("'", "'\"'\"'") + "'");
+		db.getConfig().save();
+		commitStaged();
+		assertEquals("success/\n", records());
+	}
+
+	/**
+	 * Amending retains invocation context for verification and rewrite hooks.
+	 * @throws Exception if setup or operation fails
+	 */
+	@Test
+	public void amendExportsInvocationPrefixToRewriteHook() throws Exception {
+		hookPrefix = "success/";
+		Files.createDirectories(db.getWorkTree().toPath().resolve(hookPrefix));
+		hook("pre-commit", prefixRecord());
+		hook("post-rewrite", prefixRecord());
+		commitAs(null, true);
+		assertEquals("success/\nsuccess/\n", records());
+	}
+
+	private String prefixRecord() {
+		return "printf '%s\\n' \"$GIT_PREFIX\" >>\"$GIT_DIR/actual-hooks\"\n";
+	}
+
+}

@@ -9,7 +9,11 @@
  */
 package org.eclipse.jgit.api;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.io.InputStream;
 import java.io.PrintStream;
 import java.text.MessageFormat;
@@ -41,9 +45,12 @@ import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.errors.MissingObjectException;
 import org.eclipse.jgit.errors.UnmergedPathException;
 import org.eclipse.jgit.hooks.CommitMsgHook;
+import org.eclipse.jgit.hooks.GitHook;
 import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.hooks.PostCommitHook;
+import org.eclipse.jgit.hooks.PostRewriteHook;
 import org.eclipse.jgit.hooks.PreCommitHook;
+import org.eclipse.jgit.hooks.PrepareCommitMsgHook;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.lib.CommitBuilder;
 import org.eclipse.jgit.lib.CommitConfig;
@@ -71,6 +78,7 @@ import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.TreeWalk.OperationType;
 import org.eclipse.jgit.util.ChangeIdUtil;
+import org.eclipse.jgit.util.Trace2;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -101,6 +109,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 
 	private boolean amend;
 
+	private boolean noPostRewrite;
+
 	private boolean insertChangeId;
 
 	/**
@@ -117,6 +127,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 * Setting this option bypasses the pre-commit and commit-msg hooks.
 	 */
 	private boolean noVerify;
+
+	private String hookPrefix = ""; //$NON-NLS-1$
+
+	private boolean automaticMerge;
 
 	private HashMap<String, PrintStream> hookOutRedirect = new HashMap<>(3);
 
@@ -135,6 +149,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	private CredentialsProvider credentialsProvider;
 
 	private @NonNull CleanupMode cleanupMode = CleanupMode.VERBATIM;
+
+	private boolean useNativeMessageCleanup;
+
+	private boolean allowEmptyMessage = true;
 
 	private boolean cleanDefaultIsStrip = true;
 
@@ -168,8 +186,38 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			ConcurrentRefUpdateException, NoHeadException, NoMessageException,
 			ServiceUnavailableException, UnmergedPathsException,
 			WrongRepositoryStateException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"commit", "jgit.api.CommitCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				RevCommit result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private RevCommit callWithTrace() throws GitAPIException, AbortedByHookException,
+			ConcurrentRefUpdateException, NoHeadException, NoMessageException,
+			ServiceUnavailableException, UnmergedPathsException,
+			WrongRepositoryStateException {
 		checkCallable();
 		Collections.sort(only);
+		CommitConfig config = useNativeMessageCleanup
+				? repo.getConfig().get(CommitConfig.KEY) : null;
+		String nativeCommentPrefix = "#"; //$NON-NLS-1$
+		if (config != null) {
+			try {
+				nativeCommentPrefix = config.getCommentString();
+			} catch (IllegalArgumentException invalid) {
+				throw new JGitInternalException(invalid.getMessage(), invalid);
+			}
+		}
 
 		try (RevWalk rw = new RevWalk(repo)) {
 			RepositoryState state = repo.getRepositoryState();
@@ -178,13 +226,33 @@ public class CommitCommand extends GitCommand<RevCommit> {
 						JGitText.get().cannotCommitOnARepoWithState,
 						state.name()));
 
-			if (!noVerify) {
-				Hooks.preCommit(repo, hookOutRedirect.get(PreCommitHook.NAME),
-						hookErrRedirect.get(PreCommitHook.NAME))
-						.call();
+			if (committer == null) {
+				committer = new PersonIdent(repo);
+			}
+			if (author == null) {
+				if (amend) {
+					ObjectId original = repo
+							.resolve(Constants.HEAD + "^{commit}"); //$NON-NLS-1$
+					if (original != null) {
+						author = rw.parseCommit(original).getAuthorIdent();
+					}
+				} else if (state == RepositoryState.CHERRY_PICKING_RESOLVED) {
+					ObjectId cherryPickHead = repo.readCherryPickHead();
+					if (cherryPickHead != null) {
+						author = rw.parseCommit(cherryPickHead).getAuthorIdent();
+					}
+				} else {
+					author = committer;
+				}
 			}
 
-			processOptions(state, rw);
+			if (!noVerify && !automaticMerge) {
+				configureHook(Hooks.preCommit(repo,
+						hookOutRedirect.get(PreCommitHook.NAME),
+						hookErrRedirect.get(PreCommitHook.NAME))).call();
+			}
+
+			MessageSource messageSource = processOptions(state, rw);
 
 			if (all && !repo.isBare()) {
 				try (Git git = new Git(repo)) {
@@ -218,56 +286,107 @@ public class CommitCommand extends GitCommand<RevCommit> {
 					parents.add(0, headId);
 				}
 			}
-			if (!noVerify) {
-				message = Hooks
-						.commitMsg(repo,
-								hookOutRedirect.get(CommitMsgHook.NAME),
-								hookErrRedirect.get(CommitMsgHook.NAME))
-						.setCommitMessage(message).call();
-			}
-
-			CommitConfig config = null;
-			if (CleanupMode.DEFAULT.equals(cleanupMode)) {
-				config = repo.getConfig().get(CommitConfig.KEY);
-				cleanupMode = config.resolve(cleanupMode, cleanDefaultIsStrip);
-			}
-			char comments = (char) 0;
-			if (CleanupMode.STRIP.equals(cleanupMode)
-					|| CleanupMode.SCISSORS.equals(cleanupMode)) {
-				if (commentChar == null) {
-					if (config == null) {
-						config = repo.getConfig().get(CommitConfig.KEY);
-					}
-					if (config.isAutoCommentChar()) {
-						// We're supposed to pick a character that isn't used,
-						// but then cleaning up won't remove any lines. So don't
-						// bother.
-						comments = (char) 0;
-						cleanupMode = CleanupMode.WHITESPACE;
-					} else {
-						comments = config.getCommentChar();
-					}
-				} else {
-					comments = commentChar.charValue();
-				}
-			}
-			message = CommitConfig.cleanText(message, cleanupMode, comments);
 
 			RevCommit revCommit;
-			DirCache index = repo.lockDirCache();
 			try (ObjectInserter odi = repo.newObjectInserter()) {
-				if (!only.isEmpty())
-					index = createTemporaryIndex(headId, index, rw);
+				ObjectId indexTreeId;
+				DirCache index = repo.lockDirCache();
+				try {
+					if (!only.isEmpty()) {
+						index = createTemporaryIndex(headId, index, rw);
+					}
+					// Validate the proposed tree before message hooks. Release
+					// the index lock so hooks can run index commands themselves.
+					indexTreeId = index.writeTree(odi);
+					checkIfEmpty(rw, headId, indexTreeId);
+				} finally {
+					index.unlock();
+				}
 
-				// Write the index as tree to the object database. This may
-				// fail for example when the index contains unmerged paths
-				// (unresolved conflicts)
-				ObjectId indexTreeId = index.writeTree(odi);
+				if (!noVerify && automaticMerge) {
+					configureHook(Hooks.preMergeCommit(repo, null, null)).call();
+				}
+
+				Character selectedComment = null;
+				if (config != null) {
+					if (cleanupMode == CleanupMode.DEFAULT) {
+						cleanupMode = config.resolve(cleanupMode, cleanDefaultIsStrip);
+					}
+					if (cleanupMode == CleanupMode.SCISSORS && !cleanDefaultIsStrip) {
+						cleanupMode = CleanupMode.WHITESPACE;
+					}
+					message = completeMessageLine(message);
+					if (cleanupMode != CleanupMode.VERBATIM) {
+						message = CommitConfig.cleanText(message,
+								CleanupMode.WHITESPACE, (char) 0, true);
+					}
+					if (commentChar == null && config.isAutoCommentString()) {
+						repo.writeCommitEditMsg(message);
+						char chosen = CommitConfig.determineCommentChar(message, true);
+						if (chosen == 0) {
+							throw new JGitInternalException(JGitText.get().cannotSelectCommentCharacter);
+						}
+						selectedComment = Character.valueOf(chosen);
+					}
+				}
+
+				message = configureHook(Hooks
+						.prepareCommitMsg(repo,
+								hookOutRedirect.get(PrepareCommitMsgHook.NAME),
+								hookErrRedirect.get(PrepareCommitMsgHook.NAME))
+						.setMessageSource(messageSource.source(), messageSource.commit())
+						.setCommitMessage(message)).call();
+
+				if (!noVerify) {
+					message = configureHook(Hooks
+							.commitMsg(repo,
+									hookOutRedirect.get(CommitMsgHook.NAME),
+									hookErrRedirect.get(CommitMsgHook.NAME))
+							.setCommitMessage(message)).call();
+				}
+
+				if (CleanupMode.DEFAULT.equals(cleanupMode)) {
+					config = repo.getConfig().get(CommitConfig.KEY);
+					cleanupMode = config.resolve(cleanupMode, cleanDefaultIsStrip);
+				}
+				char comments = (char) 0;
+				if (!useNativeMessageCleanup && (CleanupMode.STRIP.equals(cleanupMode)
+						|| CleanupMode.SCISSORS.equals(cleanupMode))) {
+					if (commentChar == null) {
+						if (config == null) {
+							config = repo.getConfig().get(CommitConfig.KEY);
+						}
+						if (config.isAutoCommentChar()) {
+							// We're supposed to pick a character that isn't used,
+							// but then cleaning up won't remove any lines. So don't
+							// bother.
+							comments = (char) 0;
+							cleanupMode = CleanupMode.WHITESPACE;
+						} else {
+							comments = config.getCommentChar();
+						}
+					} else {
+						comments = commentChar.charValue();
+					}
+				}
+				if (useNativeMessageCleanup) {
+					String prefix = nativeCommentPrefix;
+					if (commentChar != null) {
+						prefix = commentChar.toString();
+					} else if (selectedComment != null) {
+						prefix = selectedComment.toString();
+					}
+					message = CommitConfig.cleanText(message, cleanupMode, prefix);
+				} else {
+					message = CommitConfig.cleanText(message, cleanupMode, comments);
+				}
+				if (!allowEmptyMessage && (useNativeMessageCleanup
+						? CommitConfig.isEmptyMessage(message, cleanupMode) : message.isEmpty())) {
+					throw new NoMessageException(JGitText.get().commitMessageNotSpecified);
+				}
 
 				if (insertChangeId)
 					insertChangeId(indexTreeId);
-
-				checkIfEmpty(rw, headId, indexTreeId);
 
 				// Create a Commit object, populate it and write it
 				CommitBuilder commit = new CommitBuilder();
@@ -286,16 +405,27 @@ public class CommitCommand extends GitCommand<RevCommit> {
 				revCommit = rw.parseCommit(commitId);
 
 				updateRef(state, headId, revCommit, commitId);
-			} finally {
-				index.unlock();
 			}
 			try {
-				Hooks.postCommit(repo, hookOutRedirect.get(PostCommitHook.NAME),
-						hookErrRedirect.get(PostCommitHook.NAME)).call();
+				configureHook(Hooks.postCommit(repo,
+						hookOutRedirect.get(PostCommitHook.NAME),
+						hookErrRedirect.get(PostCommitHook.NAME))).call();
 			} catch (Exception e) {
 				log.error(MessageFormat.format(
 						JGitText.get().postCommitHookFailed, e.getMessage()),
 						e);
+			}
+			if (amend && !noPostRewrite && headId != null) {
+				try {
+					configureHook(Hooks.postRewrite(repo, "amend", //$NON-NLS-1$
+							headId.name() + " " + revCommit.name() + "\n", //$NON-NLS-1$ //$NON-NLS-2$
+							hookOutRedirect.get(PostRewriteHook.NAME),
+							hookErrRedirect.get(PostRewriteHook.NAME))).call();
+				} catch (Exception e) {
+					log.error(MessageFormat.format(
+							JGitText.get().exceptionCaughtDuringExecutionOfHook,
+							PostRewriteHook.NAME), e);
+				}
 			}
 			return revCommit;
 		} catch (UnmergedPathException e) {
@@ -304,6 +434,16 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			throw new JGitInternalException(
 					JGitText.get().exceptionCaughtDuringExecutionOfCommitCommand, e);
 		}
+	}
+
+	private static String completeMessageLine(String text) {
+		return text.isEmpty() || text.endsWith("\n") ? text : text + "\n"; //$NON-NLS-1$ //$NON-NLS-2$
+	}
+
+	private <H extends GitHook<?>> H configureHook(H hook) {
+		hook.setAuthor(author);
+		hook.setPrefix(hookPrefix);
+		return hook;
 	}
 
 	private void checkIfEmpty(RevWalk rw, ObjectId headId, ObjectId indexTreeId)
@@ -359,19 +499,20 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		switch (rc) {
 		case NEW:
 		case FORCED:
+		case NO_CHANGE:
 		case FAST_FORWARD: {
 			setCallable(false);
+			File directory = repo.getDirectory();
+			if (!repo.isBare() && directory != null) {
+				unlinkMessageFile(directory.toPath().resolve(Constants.MERGE_MSG));
+				unlinkMessageFile(directory.toPath().resolve(Constants.SQUASH_MSG));
+			}
 			if (state == RepositoryState.MERGING_RESOLVED
 					|| isMergeDuringRebase(state)) {
-				// Commit was successful. Now delete the files
-				// used for merge commits
-				repo.writeMergeCommitMsg(null);
 				repo.writeMergeHeads(null);
 			} else if (state == RepositoryState.CHERRY_PICKING_RESOLVED) {
-				repo.writeMergeCommitMsg(null);
 				repo.writeCherryPickHead(null);
 			} else if (state == RepositoryState.REVERTING_RESOLVED) {
-				repo.writeMergeCommitMsg(null);
 				repo.writeRevertHead(null);
 			}
 			break;
@@ -384,6 +525,21 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			throw new JGitInternalException(MessageFormat.format(
 					JGitText.get().updatingRefFailed, Constants.HEAD,
 					commitId.toString(), rc));
+		}
+	}
+
+	private static void unlinkMessageFile(Path path) {
+		try {
+			// Native unlink never removes a directory or follows its symlink.
+			if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+				Files.deleteIfExists(path);
+			}
+		} catch (IOException e) {
+			// Publication already succeeded; cleanup must not fail the command.
+			if (log.isDebugEnabled()) {
+				log.debug(MessageFormat.format(JGitText.get().deleteFileFailed,
+						path), e);
+			}
 		}
 	}
 
@@ -587,13 +743,14 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 *            the state of the repository we are working on
 	 * @param rw
 	 *            the RevWalk to use
+	 * @return the source and optional commit argument for message preparation
 	 *
 	 * @throws NoMessageException
 	 *             if the commit message has not been specified
 	 * @throws UnsupportedSigningFormatException
 	 *             if the configured gpg.format is not supported
 	 */
-	private void processOptions(RepositoryState state, RevWalk rw)
+	private MessageSource processOptions(RepositoryState state, RevWalk rw)
 			throws NoMessageException, UnsupportedSigningFormatException {
 		if (committer == null)
 			committer = new PersonIdent(repo);
@@ -606,47 +763,70 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			// TODO(ch) align the defaults with native git
 			allowEmpty = only.isEmpty() ? Boolean.TRUE : Boolean.FALSE;
 
-		// when doing a merge commit parse MERGE_HEAD and MERGE_MSG files
-		if (state == RepositoryState.MERGING_RESOLVED
-				|| isMergeDuringRebase(state)) {
+		boolean merging = state == RepositoryState.MERGING_RESOLVED
+				|| isMergeDuringRebase(state);
+		if (merging) {
 			try {
 				parents = repo.readMergeHeads();
-				if (parents != null)
+				if (parents != null) {
 					for (int i = 0; i < parents.size(); i++) {
-						RevObject ro = rw.parseAny(parents.get(i));
-						if (ro instanceof RevTag)
-							parents.set(i, rw.peel(ro));
+						RevObject parent = rw.parseAny(parents.get(i));
+						if (parent instanceof RevTag) {
+							parents.set(i, rw.peel(parent));
+						}
 					}
+				}
 			} catch (IOException e) {
 				throw new JGitInternalException(MessageFormat.format(
 						JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
 						Constants.MERGE_HEAD, e), e);
 			}
-			if (message == null) {
+		}
+
+		MessageSource source = new MessageSource(null, null);
+		if (message != null) {
+			source = new MessageSource("message", null); //$NON-NLS-1$
+		} else if (amend) {
+			try {
+				ObjectId head = repo.resolve(Constants.HEAD + "^{commit}"); //$NON-NLS-1$
+				if (head != null) {
+					message = rw.parseCommit(head).getFullMessage();
+				}
+			} catch (IOException e) {
+				throw new JGitInternalException(e.getMessage(), e);
+			}
+			source = new MessageSource("commit", Constants.HEAD); //$NON-NLS-1$
+		} else {
+			String merge = null;
+			String squash = null;
+			if (!repo.isBare() && repo.getDirectory() != null) {
 				try {
-					message = repo.readMergeCommitMsg();
+					merge = repo.readMergeCommitMsg();
+					squash = repo.readSquashCommitMsg();
 				} catch (IOException e) {
-					throw new JGitInternalException(MessageFormat.format(
-							JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
-							Constants.MERGE_MSG, e), e);
+					throw new JGitInternalException(e.getMessage(), e);
 				}
 			}
-		} else if (state == RepositoryState.SAFE && message == null) {
-			try {
-				message = repo.readSquashCommitMsg();
-				if (message != null)
-					repo.writeSquashCommitMsg(null /* delete */);
-			} catch (IOException e) {
-				throw new JGitInternalException(MessageFormat.format(
-						JGitText.get().exceptionOccurredDuringReadingOfGIT_DIR,
-						Constants.MERGE_MSG, e), e);
+			if (merge != null) {
+				message = squash == null ? merge : squash + merge;
+				source = new MessageSource(
+						squash == null ? "merge" : "squash", null); //$NON-NLS-1$ //$NON-NLS-2$
+			} else if (squash != null) {
+				message = squash;
+				source = new MessageSource("squash", null); //$NON-NLS-1$
+			} else if (merging) {
+				source = new MessageSource("merge", null); //$NON-NLS-1$
+			} else if (state == RepositoryState.CHERRY_PICKING_RESOLVED) {
+				source = new MessageSource("commit", Constants.CHERRY_PICK_HEAD); //$NON-NLS-1$
 			}
-
 		}
-		if (message == null)
-			// as long as we don't support -C option we have to have
-			// an explicit message
+		if (message == null && useNativeMessageCleanup) {
+			// A preparation hook may supply an initially empty message.
+			message = ""; //$NON-NLS-1$
+		}
+		if (message == null) {
 			throw new NoMessageException(JGitText.get().commitMessageNotSpecified);
+		}
 
 		if (gpgConfig == null) {
 			gpgConfig = new GpgConfig(repo.getConfig());
@@ -655,6 +835,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 			signCommit = gpgConfig.isSignCommits() ? Boolean.TRUE
 					: Boolean.FALSE;
 		}
+		return source;
+	}
+
+	private record MessageSource(String source, String commit) {
 	}
 
 	private boolean isMergeDuringRebase(RepositoryState state) {
@@ -674,12 +858,41 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 * Set the commit message
 	 *
 	 * @param message
-	 *            the commit message used for the {@code commit}
+	 *            the commit message used for the {@code commit}; null selects a
+	 *            prepared repository message, or HEAD's message when amending
 	 * @return {@code this}
 	 */
 	public CommitCommand setMessage(String message) {
 		checkCallable();
 		this.message = message;
+		return this;
+	}
+
+	/**
+	 * Normalize the message file before message hooks and retain native final
+	 * newline semantics after cleanup. The selected cleanup mode still applies;
+	 * VERBATIM preserves hook edits exactly. With setDefaultClean(false),
+	 * SCISSORS follows the native no-editor WHITESPACE policy. Disabled by
+	 * default for compatibility.
+	 * @param nativeCleanup whether to use the native message-file protocol
+	 * @return this command
+	 * @since 7.3
+	 */
+	public CommitCommand setUseNativeMessageCleanup(boolean nativeCleanup) {
+		checkCallable();
+		useNativeMessageCleanup = nativeCleanup;
+		return this;
+	}
+
+	/**
+	 * Permit an empty message after hooks and cleanup. Defaults to true.
+	 * @param allow whether an empty final message is allowed
+	 * @return this command
+	 * @since 7.3
+	 */
+	public CommitCommand setAllowEmptyMessage(boolean allow) {
+		checkCallable();
+		allowEmptyMessage = allow;
 		return this;
 	}
 
@@ -815,7 +1028,7 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 * Sets the author for this {@code commit}. If no author is explicitly
 	 * specified because this method is never called or called with {@code null}
 	 * value then the author will be set to the committer or to the original
-	 * author when amending.
+	 * author when amending or continuing a resolved cherry-pick.
 	 *
 	 * @param author
 	 *            the author used for the {@code commit}
@@ -830,7 +1043,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	/**
 	 * Sets the author for this {@code commit}. If no author is explicitly
 	 * specified because this method is never called then the author will be set
-	 * to the committer or to the original author when amending.
+	 * to the committer or to the original author when amending or continuing a
+	 * resolved cherry-pick.
 	 *
 	 * @param name
 	 *            the name of the author used for the {@code commit}
@@ -893,6 +1107,19 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	}
 
 	/**
+	 * Suppress the post-rewrite notification for an amendment.
+	 *
+	 * @param noPostRewrite whether to suppress notification
+	 * @return this command
+	 * @since 7.3
+	 */
+	public CommitCommand setNoPostRewrite(boolean noPostRewrite) {
+		checkCallable();
+		this.noPostRewrite = noPostRewrite;
+		return this;
+	}
+
+	/**
 	 * Commit dedicated path only.
 	 * <p>
 	 * This method can be called several times to add multiple paths. Full file
@@ -948,6 +1175,20 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	}
 
 	/**
+	 * Set the invocation directory reported to commit hooks as GIT_PREFIX.
+	 * This is context only; hooks continue to execute at the worktree root.
+	 * @param prefix repository-relative directory including a trailing slash;
+	 *            null or empty for a root invocation
+	 * @return this command
+	 * @since 7.3
+	 */
+	public CommitCommand setHookPrefix(String prefix) {
+		checkCallable();
+		hookPrefix = prefix == null ? "" : prefix; //$NON-NLS-1$
+		return this;
+	}
+
+	/**
 	 * Sets the {@link #noVerify} option on this commit command.
 	 * <p>
 	 * Both the pre-commit and commit-msg hooks can block a commit by their
@@ -966,9 +1207,16 @@ public class CommitCommand extends GitCommand<RevCommit> {
 		return this;
 	}
 
+	// Automatic merges verify after the merge tree snapshot is taken.
+	CommitCommand setAutomaticMerge(boolean automaticMerge) {
+		this.automaticMerge = automaticMerge;
+		return this;
+	}
+
 	/**
 	 * Set the output stream for all hook scripts executed by this command
-	 * (pre-commit, commit-msg, post-commit). If not set it defaults to
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
+	 * defaults to
 	 * {@code System.out}.
 	 *
 	 * @param hookStdOut
@@ -978,14 +1226,17 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 */
 	public CommitCommand setHookOutputStream(PrintStream hookStdOut) {
 		setHookOutputStream(PreCommitHook.NAME, hookStdOut);
+		setHookOutputStream(PrepareCommitMsgHook.NAME, hookStdOut);
 		setHookOutputStream(CommitMsgHook.NAME, hookStdOut);
 		setHookOutputStream(PostCommitHook.NAME, hookStdOut);
+		setHookOutputStream(PostRewriteHook.NAME, hookStdOut);
 		return this;
 	}
 
 	/**
 	 * Set the error stream for all hook scripts executed by this command
-	 * (pre-commit, commit-msg, post-commit). If not set it defaults to
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
+	 * defaults to
 	 * {@code System.err}.
 	 *
 	 * @param hookStdErr
@@ -995,14 +1246,17 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	 */
 	public CommitCommand setHookErrorStream(PrintStream hookStdErr) {
 		setHookErrorStream(PreCommitHook.NAME, hookStdErr);
+		setHookErrorStream(PrepareCommitMsgHook.NAME, hookStdErr);
 		setHookErrorStream(CommitMsgHook.NAME, hookStdErr);
 		setHookErrorStream(PostCommitHook.NAME, hookStdErr);
+		setHookErrorStream(PostRewriteHook.NAME, hookStdErr);
 		return this;
 	}
 
 	/**
 	 * Set the output stream for a selected hook script executed by this command
-	 * (pre-commit, commit-msg, post-commit). If not set it defaults to
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
+	 * defaults to
 	 * {@code System.out}.
 	 *
 	 * @param hookName
@@ -1015,8 +1269,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	public CommitCommand setHookOutputStream(String hookName,
 			PrintStream hookStdOut) {
 		if (!(PreCommitHook.NAME.equals(hookName)
+				|| PrepareCommitMsgHook.NAME.equals(hookName)
 				|| CommitMsgHook.NAME.equals(hookName)
-				|| PostCommitHook.NAME.equals(hookName))) {
+				|| PostCommitHook.NAME.equals(hookName)
+				|| PostRewriteHook.NAME.equals(hookName))) {
 			throw new IllegalArgumentException(
 					MessageFormat.format(JGitText.get().illegalHookName,
 							hookName));
@@ -1027,7 +1283,8 @@ public class CommitCommand extends GitCommand<RevCommit> {
 
 	/**
 	 * Set the error stream for a selected hook script executed by this command
-	 * (pre-commit, commit-msg, post-commit). If not set it defaults to
+	 * (pre-commit, prepare-commit-msg, commit-msg, post-commit, post-rewrite). If not set it
+	 * defaults to
 	 * {@code System.err}.
 	 *
 	 * @param hookName
@@ -1040,8 +1297,10 @@ public class CommitCommand extends GitCommand<RevCommit> {
 	public CommitCommand setHookErrorStream(String hookName,
 			PrintStream hookStdErr) {
 		if (!(PreCommitHook.NAME.equals(hookName)
+				|| PrepareCommitMsgHook.NAME.equals(hookName)
 				|| CommitMsgHook.NAME.equals(hookName)
-				|| PostCommitHook.NAME.equals(hookName))) {
+				|| PostCommitHook.NAME.equals(hookName)
+				|| PostRewriteHook.NAME.equals(hookName))) {
 			throw new IllegalArgumentException(MessageFormat
 					.format(JGitText.get().illegalHookName, hookName));
 		}

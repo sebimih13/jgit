@@ -91,6 +91,10 @@ public class CLIText extends TranslationBundle {
 	}
 
 	// @formatter:off
+	/***/ public String invalidCommitCleanupMode;
+	/***/ public String usage_commitNoEdit;
+	/***/ public String commitMessageOrNoEditRequired;
+	/***/ public String malformedAuthor;
 	/***/ public String addIncompatibleOptions;
 	/***/ public String alreadyOnBranch;
 	/***/ public String alreadyUpToDate;

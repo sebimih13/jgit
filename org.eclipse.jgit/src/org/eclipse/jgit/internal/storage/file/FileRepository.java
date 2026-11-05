@@ -264,8 +264,8 @@ public class FileRepository extends Repository {
 		refs.create();
 		objectDatabase.create();
 
-		FileUtils.mkdir(new File(getDirectory(), "branches")); //$NON-NLS-1$
-		FileUtils.mkdir(new File(getDirectory(), "hooks")); //$NON-NLS-1$
+		FileUtils.mkdir(new File(getDirectory(), "branches"), true); //$NON-NLS-1$
+		FileUtils.mkdir(new File(getDirectory(), "hooks"), true); //$NON-NLS-1$
 
 		RefUpdate head = updateRef(Constants.HEAD);
 		head.disableRefLog();

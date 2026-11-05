@@ -41,6 +41,7 @@ import org.eclipse.jgit.events.WorkingTreeModifiedEvent;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.lib.CoreConfig.EolStreamType;
 import org.eclipse.jgit.lib.FileMode;
 import org.eclipse.jgit.lib.NullProgressMonitor;
@@ -56,6 +57,7 @@ import org.eclipse.jgit.revwalk.RevTree;
 import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Checkout a branch to the working tree.
@@ -170,13 +172,34 @@ public class CheckoutCommand extends GitCommand<Ref> {
 	public Ref call() throws GitAPIException, RefAlreadyExistsException,
 			RefNotFoundException, InvalidRefNameException,
 			CheckoutConflictException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"checkout", "jgit.api.CheckoutCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Ref result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Ref callWithTrace() throws GitAPIException, RefAlreadyExistsException,
+			RefNotFoundException, InvalidRefNameException,
+			CheckoutConflictException {
 		checkCallable();
 		try {
 			processOptions();
+			ObjectId previousHead = repo.resolve(Constants.HEAD);
 			if (checkoutAllPaths || !paths.isEmpty()) {
 				checkoutPaths();
 				status = new CheckoutResult(Status.OK, paths);
 				setCallable(false);
+				Hooks.postCheckout(repo, previousHead, previousHead, false, null, null).call();
 				return null;
 			}
 
@@ -301,6 +324,7 @@ public class CheckoutCommand extends GitCommand<Ref> {
 				status = new CheckoutResult(new ArrayList<>(dco
 						.getUpdated().keySet()), dco.getRemoved());
 
+			Hooks.postCheckout(repo, previousHead, newCommit, true, null, null).call();
 			return ref;
 		} catch (IOException ioe) {
 			throw new JGitInternalException(ioe.getMessage(), ioe);

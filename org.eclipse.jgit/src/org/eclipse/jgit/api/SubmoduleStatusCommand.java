@@ -25,6 +25,7 @@ import org.eclipse.jgit.submodule.SubmoduleStatus;
 import org.eclipse.jgit.submodule.SubmoduleStatusType;
 import org.eclipse.jgit.submodule.SubmoduleWalk;
 import org.eclipse.jgit.treewalk.filter.PathFilterGroup;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a submodule status command.
@@ -63,6 +64,23 @@ public class SubmoduleStatusCommand extends
 
 	@Override
 	public Map<String, SubmoduleStatus> call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"submodule", "jgit.api.SubmoduleStatusCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Map<String, SubmoduleStatus> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Map<String, SubmoduleStatus> callWithTrace() throws GitAPIException {
 		checkCallable();
 
 		try (SubmoduleWalk generator = SubmoduleWalk.forIndex(repo)) {

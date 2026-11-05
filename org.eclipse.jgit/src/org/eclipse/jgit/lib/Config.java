@@ -966,7 +966,7 @@ public class Config {
 		return state.get().get(section, subsection, name);
 	}
 
-	private ConfigSnapshot getState() {
+	ConfigSnapshot getState() {
 		ConfigSnapshot cur, upd;
 		do {
 			cur = state.get();

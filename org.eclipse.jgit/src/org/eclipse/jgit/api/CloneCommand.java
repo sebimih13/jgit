@@ -34,6 +34,7 @@ import org.eclipse.jgit.lib.AnyObjectId;
 import org.eclipse.jgit.lib.BranchConfig.BranchRebaseMode;
 import org.eclipse.jgit.lib.ConfigConstants;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.lib.NullProgressMonitor;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.ProgressMonitor;
@@ -50,6 +51,7 @@ import org.eclipse.jgit.transport.TagOpt;
 import org.eclipse.jgit.transport.URIish;
 import org.eclipse.jgit.util.FS;
 import org.eclipse.jgit.util.FileUtils;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Clone a repository into a new working directory
@@ -84,6 +86,8 @@ public class CloneCommand extends TransportCommand<CloneCommand, Git> {
 	private boolean cloneSubmodules;
 
 	private boolean noCheckout;
+
+	private File templateDirectory;
 
 	private Collection<String> branchesToClone;
 
@@ -174,6 +178,24 @@ public class CloneCommand extends TransportCommand<CloneCommand, Git> {
 	@Override
 	public Git call() throws GitAPIException, InvalidRemoteException,
 			org.eclipse.jgit.api.errors.TransportException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"clone", "jgit.api.CloneCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Git result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Git callWithTrace() throws GitAPIException, InvalidRemoteException,
+			org.eclipse.jgit.api.errors.TransportException {
 		URIish u = null;
 		try {
 			u = new URIish(uri);
@@ -224,6 +246,17 @@ public class CloneCommand extends TransportCommand<CloneCommand, Git> {
 		return new Git(repository, true);
 	}
 
+	/**
+	 * Set the template directory for the repository created by this clone.
+	 * @param directory templates, or null for environment/config defaults
+	 * @return this command
+	 * @since 7.3
+	 */
+	public CloneCommand setTemplateDirectory(File directory) {
+		templateDirectory = directory;
+		return this;
+	}
+
 	private void setFetchType() {
 		if (mirror) {
 			fetchType = FETCH_TYPE.MIRROR;
@@ -266,6 +299,7 @@ public class CloneCommand extends TransportCommand<CloneCommand, Git> {
 	private Repository init() throws GitAPIException {
 		InitCommand command = Git.init();
 		command.setBare(bare);
+		command.setTemplateDirectory(templateDirectory);
 		command.setRelativeDirs(relativePaths);
 		if (fs != null) {
 			command.setFs(fs);
@@ -394,6 +428,7 @@ public class CloneCommand extends TransportCommand<CloneCommand, Git> {
 					commit.getTree());
 			co.setProgressMonitor(monitor);
 			co.checkout();
+			Hooks.postCheckout(clonedRepo, ObjectId.zeroId(), commit, true, null, null).call();
 			if (cloneSubmodules)
 				cloneSubmodules(clonedRepo);
 		}

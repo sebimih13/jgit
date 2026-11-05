@@ -24,6 +24,7 @@ import org.eclipse.jgit.lib.Ref;
 import org.eclipse.jgit.lib.RefUpdate;
 import org.eclipse.jgit.lib.RefUpdate.Result;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Used to delete one or several tags.
@@ -50,6 +51,23 @@ public class DeleteTagCommand extends GitCommand<List<String>> {
 
 	@Override
 	public List<String> call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"tag", "jgit.api.DeleteTagCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				List<String> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private List<String> callWithTrace() throws GitAPIException {
 		checkCallable();
 		List<String> result = new ArrayList<>();
 		if (tags.isEmpty())

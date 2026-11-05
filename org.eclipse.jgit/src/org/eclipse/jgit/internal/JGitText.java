@@ -30,6 +30,15 @@ public class JGitText extends TranslationBundle {
 	}
 
 	// @formatter:off
+	/***/ public String pushToCheckoutHookDeclined;
+	/***/ public String pushToCheckoutFailed;
+	/***/ public String pushToCheckoutUnstagedChanges;
+	/***/ public String pushToCheckoutStagedChanges;
+	/***/ public String deleteCurrentBranchProhibited;
+	/***/ public String updatingCurrentBranchWarning;
+	/***/ public String deletingCurrentBranchWarning;
+	/***/ public String preReceiveHookDeclined;
+	/***/ public String updateHookDeclined;
 	/***/ public String abbreviationLengthMustBeNonNegative;
 	/***/ public String abortingRebase;
 	/***/ public String abortingRebaseFailed;
@@ -110,6 +119,7 @@ public class JGitText extends TranslationBundle {
 	/***/ public String cannotAccessLastModifiedForSafeDeletion;
 	/***/ public String cannotBeCombined;
 	/***/ public String cannotBeRecursiveWhenTreesAreIncluded;
+	/***/ public String cannotSelectCommentCharacter;
 	/***/ public String cannotChangeActionOnComment;
 	/***/ public String cannotCheckoutFromUnbornBranch;
 	/***/ public String cannotCheckoutOursSwitchBranch;
@@ -398,6 +408,13 @@ public class JGitText extends TranslationBundle {
 	/***/ public String gcFailed;
 	/***/ public String gcTooManyUnpruned;
 	/***/ public String headRequiredToStash;
+	/***/ public String hookCommandMissing;
+	/***/ public String hookConfigValueMissing;
+	/***/ public String hookDisabledCommandMissing;
+	/***/ public String hookFriendlyNameCollision;
+	/***/ public String hookFriendlyNameMatchesEvent;
+	/***/ public String hookJobCountInvalid;
+	/***/ public String hookParallelSettingInvalid;
 	/***/ public String hoursAgo;
 	/***/ public String httpConfigCannotNormalizeURL;
 	/***/ public String httpConfigInvalidURL;
@@ -466,6 +483,7 @@ public class JGitText extends TranslationBundle {
 	/***/ public String invalidIntegerValue;
 	/***/ public String invalidKey;
 	/***/ public String invalidLineInConfigFile;
+	/***/ public String invalidCommentString;
 	/***/ public String invalidLineInConfigFileWithParam;
 	/***/ public String invalidModeFor;
 	/***/ public String invalidModeForPath;
@@ -676,6 +694,7 @@ public class JGitText extends TranslationBundle {
 	/***/ public String pushDefaultUnknown;
 	/***/ public String pushIsNotSupportedForBundleTransport;
 	/***/ public String pushNotPermitted;
+	/***/ public String pushNoMatchingRefs;
 	/***/ public String pushOptionsNotSupported;
 	/***/ public String rawLogMessageDoesNotParseAsLogEntry;
 	/***/ public String readConfigFailed;

@@ -32,6 +32,7 @@ import org.eclipse.jgit.treewalk.AbstractTreeIterator;
 import org.eclipse.jgit.treewalk.CanonicalTreeParser;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.treewalk.filter.TreeFilter;
+import org.eclipse.jgit.util.Trace2;
 import org.eclipse.jgit.util.io.NullOutputStream;
 
 /**
@@ -89,6 +90,23 @@ public class DiffCommand extends GitCommand<List<DiffEntry>> {
 	 */
 	@Override
 	public List<DiffEntry> call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"diff", "jgit.api.DiffCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				List<DiffEntry> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private List<DiffEntry> callWithTrace() throws GitAPIException {
 		try (DiffFormatter diffFmt = getDiffFormatter()) {
 			diffFmt.setRepository(repo);
 			diffFmt.setProgressMonitor(monitor);

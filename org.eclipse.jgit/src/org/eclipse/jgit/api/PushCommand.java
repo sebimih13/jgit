@@ -48,6 +48,7 @@ import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.RemoteConfig;
 import org.eclipse.jgit.transport.RemoteRefUpdate;
 import org.eclipse.jgit.transport.Transport;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Push} command. It has setters for all
@@ -57,8 +58,8 @@ import org.eclipse.jgit.transport.Transport;
  * @see <a href="http://www.kernel.org/pub/software/scm/git/docs/git-push.html"
  *      >Git documentation about Push</a>
  */
-public class PushCommand extends
-		TransportCommand<PushCommand, Iterable<PushResult>> {
+public class PushCommand
+		extends TransportCommand<PushCommand, Iterable<PushResult>> {
 
 	private String remote;
 
@@ -71,9 +72,15 @@ public class PushCommand extends
 	private String receivePack = RemoteConfig.DEFAULT_RECEIVE_PACK;
 
 	private boolean dryRun;
+
+	private boolean noVerify;
+
 	private boolean atomic;
+
 	private boolean force;
+
 	private boolean thin = Transport.DEFAULT_PUSH_THIN;
+
 	private boolean useBitmaps = Transport.DEFAULT_PUSH_USE_BITMAPS;
 
 	private PrintStream hookOutRedirect;
@@ -111,8 +118,27 @@ public class PushCommand extends
 	 * call to {@link #call()})
 	 */
 	@Override
-	public Iterable<PushResult> call() throws GitAPIException,
-			InvalidRemoteException,
+	public Iterable<PushResult> call()
+			throws GitAPIException, InvalidRemoteException,
+			org.eclipse.jgit.api.errors.TransportException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo, "push", //$NON-NLS-1$
+				"jgit.api.PushCommand")) { //$NON-NLS-1$
+			boolean returned = false;
+			try {
+				Iterable<PushResult> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Iterable<PushResult> callWithTrace()
+			throws GitAPIException, InvalidRemoteException,
 			org.eclipse.jgit.api.errors.TransportException {
 		checkCallable();
 		setCallable(false);
@@ -123,8 +149,7 @@ public class PushCommand extends
 			Config config = repo.getConfig();
 			remote = determineRemote(config, remote);
 			if (refSpecs.isEmpty()) {
-				RemoteConfig rc = new RemoteConfig(config,
-						getRemote());
+				RemoteConfig rc = new RemoteConfig(config, getRemote());
 				refSpecs.addAll(rc.getPushRefSpecs());
 				if (refSpecs.isEmpty()) {
 					determineDefaultRefSpecs(config);
@@ -139,12 +164,13 @@ public class PushCommand extends
 			List<Transport> transports = Transport.openAll(repo, remote,
 					Transport.Operation.PUSH);
 			for (@SuppressWarnings("resource") // Explicitly closed in finally
-					final Transport transport : transports) {
+			final Transport transport : transports) {
 				transport.setPushThin(thin);
 				transport.setPushAtomic(atomic);
 				if (receivePack != null)
 					transport.setOptionReceivePack(receivePack);
 				transport.setDryRun(dryRun);
+				transport.setRunPrePushHook(!noVerify);
 				transport.setPushOptions(pushOptions);
 				transport.setPushUseBitmaps(useBitmaps);
 				transport.setHookOutputStream(hookOutRedirect);
@@ -301,6 +327,21 @@ public class PushCommand extends
 	public PushCommand setRemote(String remote) {
 		checkCallable();
 		this.remote = remote;
+		return this;
+	}
+
+	/**
+	 * Bypass the local pre-push hook, like {@code git push --no-verify}.
+	 * Server-side verification is unaffected.
+	 *
+	 * @param noVerify
+	 *            whether to bypass the pre-push hook
+	 * @return this command
+	 * @since 7.3
+	 */
+	public PushCommand setNoVerify(boolean noVerify) {
+		checkCallable();
+		this.noVerify = noVerify;
 		return this;
 	}
 
@@ -468,7 +509,8 @@ public class PushCommand extends
 	/**
 	 * The ref specs to be used in the push operation
 	 *
-	 * @param specs a {@link org.eclipse.jgit.transport.RefSpec} object.
+	 * @param specs
+	 *            a {@link org.eclipse.jgit.transport.RefSpec} object.
 	 * @return {@code this}
 	 */
 	public PushCommand setRefSpecs(RefSpec... specs) {
@@ -569,9 +611,8 @@ public class PushCommand extends
 			try {
 				src = repo.findRef(nameOrSpec);
 			} catch (IOException e) {
-				throw new JGitInternalException(
-						JGitText.get().exceptionCaughtDuringExecutionOfPushCommand,
-						e);
+				throw new JGitInternalException(JGitText
+						.get().exceptionCaughtDuringExecutionOfPushCommand, e);
 			}
 			if (src != null)
 				add(src);
@@ -591,7 +632,8 @@ public class PushCommand extends
 	/**
 	 * Sets whether the push operation should be a dry run
 	 *
-	 * @param dryRun a boolean.
+	 * @param dryRun
+	 *            a boolean.
 	 * @return {@code this}
 	 */
 	public PushCommand setDryRun(boolean dryRun) {

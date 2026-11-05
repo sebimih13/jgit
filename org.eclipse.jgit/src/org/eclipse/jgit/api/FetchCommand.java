@@ -45,6 +45,7 @@ import org.eclipse.jgit.transport.FetchResult;
 import org.eclipse.jgit.transport.RefSpec;
 import org.eclipse.jgit.transport.TagOpt;
 import org.eclipse.jgit.transport.Transport;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Fetch} command. It has setters for all
@@ -211,6 +212,24 @@ public class FetchCommand extends TransportCommand<FetchCommand, FetchResult> {
 	 */
 	@Override
 	public FetchResult call() throws GitAPIException, InvalidRemoteException,
+			org.eclipse.jgit.api.errors.TransportException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"fetch", "jgit.api.FetchCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				FetchResult result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private FetchResult callWithTrace() throws GitAPIException, InvalidRemoteException,
 			org.eclipse.jgit.api.errors.TransportException {
 		checkCallable();
 

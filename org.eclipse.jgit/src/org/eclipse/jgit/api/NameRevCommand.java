@@ -30,6 +30,7 @@ import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevObject;
 import org.eclipse.jgit.revwalk.RevTag;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Command to find human-readable names of revisions.
@@ -104,6 +105,23 @@ public class NameRevCommand extends GitCommand<Map<ObjectId, String>> {
 
 	@Override
 	public Map<ObjectId, String> call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"name-rev", "jgit.api.NameRevCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				Map<ObjectId, String> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private Map<ObjectId, String> callWithTrace() throws GitAPIException {
 		try {
 			Map<ObjectId, String> nonCommits = new HashMap<>();
 			FIFORevQueue pending = new FIFORevQueue();

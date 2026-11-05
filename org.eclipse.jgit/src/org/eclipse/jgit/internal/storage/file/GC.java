@@ -64,6 +64,7 @@ import java.util.stream.Stream;
 
 import org.eclipse.jgit.annotations.NonNull;
 import org.eclipse.jgit.api.PackRefsCommand;
+import org.eclipse.jgit.api.errors.AbortedByHookException;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.dircache.DirCacheIterator;
 import org.eclipse.jgit.errors.CancelledException;
@@ -71,6 +72,7 @@ import org.eclipse.jgit.errors.CorruptObjectException;
 import org.eclipse.jgit.errors.IncorrectObjectTypeException;
 import org.eclipse.jgit.errors.MissingObjectException;
 import org.eclipse.jgit.errors.NoWorkTreeException;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.internal.JGitText;
 import org.eclipse.jgit.internal.storage.commitgraph.CommitGraphWriter;
 import org.eclipse.jgit.internal.storage.commitgraph.GraphCommits;
@@ -240,6 +242,16 @@ public class GC {
 	 */
 	public CompletableFuture<Collection<Pack>> gc()
 			throws IOException, ParseException, GitAPIException {
+		if (automatic) {
+			if (!needGc()) {
+				return CompletableFuture.completedFuture(Collections.emptyList());
+			}
+			try {
+				Hooks.preAutoGc(repo, System.err, System.err).call();
+			} catch (AbortedByHookException e) {
+				return CompletableFuture.completedFuture(Collections.emptyList());
+			}
+		}
 		if (!background) {
 			return CompletableFuture.completedFuture(doGc());
 		}
@@ -283,9 +295,7 @@ public class GC {
 
 	private Collection<Pack> doGc()
 			throws IOException, ParseException, GitAPIException {
-		if (automatic && !needGc()) {
-			return Collections.emptyList();
-		}
+
 		try (PidLock lock = new PidLock()) {
 			if (!lock.lock()) {
 				return Collections.emptyList();
@@ -1775,7 +1785,6 @@ public class GC {
 		} else {
 			return tooManyLooseObjects();
 		}
-		// TODO run pre-auto-gc hook, if it fails return false
 		return true;
 	}
 

@@ -41,6 +41,7 @@ import org.eclipse.jgit.transport.ssh.jsch.JschConfigSessionFactory;
 import org.eclipse.jgit.transport.sshd.DefaultProxyDataFactory;
 import org.eclipse.jgit.transport.sshd.JGitKeyCache;
 import org.eclipse.jgit.transport.sshd.SshdSessionFactory;
+import org.eclipse.jgit.util.Trace2;
 import org.eclipse.jgit.util.io.ThrowingPrintWriter;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.Option;
@@ -214,6 +215,19 @@ public abstract class TextBuiltin {
 	 *             standard error.
 	 */
 	public final void execute(String[] args) throws Exception {
+		try (Trace2.Scope trace = Trace2.getInstance().command(db,
+				commandName != null ? commandName : "jgit", //$NON-NLS-1$
+				"jgit.pgm.TextBuiltin")) { //$NON-NLS-1$
+			try {
+				executeWithTrace(args);
+			} catch (Exception | Error failure) {
+				trace.failure(failure);
+				throw failure;
+			}
+		}
+	}
+
+	private void executeWithTrace(String[] args) throws Exception {
 		parseArguments(args);
 		switch (sshDriver) {
 		case APACHE: {

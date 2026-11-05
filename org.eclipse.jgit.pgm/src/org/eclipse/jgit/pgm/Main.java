@@ -29,6 +29,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
+import org.eclipse.jgit.util.Trace2;
 import org.eclipse.jgit.awtui.AwtAuthenticator;
 import org.eclipse.jgit.awtui.AwtCredentialsProvider;
 import org.eclipse.jgit.errors.TransportException;
@@ -125,6 +126,7 @@ public class Main {
 	 *             if an error occurred
 	 */
 	protected void run(String[] argv) throws Exception {
+		Trace2.initializeCommandLine(argv);
 		writer = createErrorWriter();
 		try {
 			if (!installConsole()) {
@@ -183,6 +185,7 @@ public class Main {
 		}
 		gcExecutor.shutdown();
 		gcExecutor.awaitTermination(10, TimeUnit.MINUTES);
+		Trace2.getInstance().exit(0);
 	}
 
 	PrintWriter createErrorWriter() {
@@ -273,6 +276,7 @@ public class Main {
 	 */
 	void exit(int status, Exception t) throws Exception {
 		writer.flush();
+		Trace2.getInstance().exit(status);
 		System.exit(status);
 	}
 

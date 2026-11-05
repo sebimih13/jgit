@@ -22,6 +22,7 @@ import java.util.Map;
 
 import org.eclipse.jgit.annotations.Nullable;
 import org.eclipse.jgit.api.MergeResult.MergeStatus;
+import org.eclipse.jgit.hooks.Hooks;
 import org.eclipse.jgit.api.errors.CheckoutConflictException;
 import org.eclipse.jgit.api.errors.ConcurrentRefUpdateException;
 import org.eclipse.jgit.api.errors.GitAPIException;
@@ -59,6 +60,7 @@ import org.eclipse.jgit.revwalk.RevWalk;
 import org.eclipse.jgit.revwalk.RevWalkUtils;
 import org.eclipse.jgit.treewalk.FileTreeIterator;
 import org.eclipse.jgit.util.StringUtils;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * A class used to execute a {@code Merge} command. It has setters for all
@@ -197,6 +199,8 @@ public class MergeCommand extends GitCommand<MergeResult> {
 
 	private Boolean commit;
 
+	private boolean noVerify;
+
 	/**
 	 * Constructor for MergeCommand.
 	 *
@@ -218,6 +222,25 @@ public class MergeCommand extends GitCommand<MergeResult> {
 	@Override
 	@SuppressWarnings("boxing")
 	public MergeResult call() throws GitAPIException, NoHeadException,
+			ConcurrentRefUpdateException, CheckoutConflictException,
+			InvalidMergeHeadsException, WrongRepositoryStateException, NoMessageException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"merge", "jgit.api.MergeCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				MergeResult result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private MergeResult callWithTrace() throws GitAPIException, NoHeadException,
 			ConcurrentRefUpdateException, CheckoutConflictException,
 			InvalidMergeHeadsException, WrongRepositoryStateException, NoMessageException {
 		checkCallable();
@@ -305,6 +328,7 @@ public class MergeCommand extends GitCommand<MergeResult> {
 					repo.writeSquashCommitMsg(squashMessage);
 				}
 				setCallable(false);
+				Hooks.postMerge(repo, squash.booleanValue(), null, null).call();
 				return new MergeResult(newHead, base, new ObjectId[] {
 						headCommit, srcCommit }, mergeStatus, mergeStrategy,
 						null, msg);
@@ -379,6 +403,8 @@ public class MergeCommand extends GitCommand<MergeResult> {
 					if (commit && !squash) {
 						try (Git git = new Git(getRepository())) {
 							newHeadId = git.commit()
+									.setAutomaticMerge(true)
+									.setNoVerify(noVerify)
 									.setReflogComment(refLogMessage.toString())
 									.setInsertChangeId(insertChangeId)
 									.call().getId();
@@ -390,6 +416,9 @@ public class MergeCommand extends GitCommand<MergeResult> {
 						msg = JGitText.get().squashCommitNotUpdatingHEAD;
 						newHeadId = headCommit.getId();
 						mergeStatus = MergeStatus.MERGED_SQUASHED;
+					}
+					if (squash.booleanValue() || commit.booleanValue()) {
+						Hooks.postMerge(repo, squash.booleanValue(), null, null).call();
 					}
 					return new MergeResult(newHeadId, null,
 							new ObjectId[] { headCommit.getId(),
@@ -411,6 +440,9 @@ public class MergeCommand extends GitCommand<MergeResult> {
 						.formatWithConflicts(mergeMessage, unmergedPaths,
 								commentChar);
 				repo.writeMergeCommitMsg(mergeMessageWithConflicts);
+				if (squash.booleanValue()) {
+					Hooks.postMerge(repo, true, null, null).call();
+				}
 				return new MergeResult(null, merger.getBaseCommitId(),
 						new ObjectId[] { headCommit.getId(),
 								srcCommit.getId() },
@@ -620,6 +652,20 @@ public class MergeCommand extends GitCommand<MergeResult> {
 	 */
 	public MergeCommand setMessage(String message) {
 		this.message = message;
+		return this;
+	}
+
+	/**
+	 * Bypass pre-merge-commit and commit-msg verification.
+	 *
+	 * @param noVerify
+	 *            whether to bypass verification
+	 * @return this command
+	 * @since 7.3
+	 */
+	public MergeCommand setNoVerify(boolean noVerify) {
+		checkCallable();
+		this.noVerify = noVerify;
 		return this;
 	}
 

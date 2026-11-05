@@ -44,6 +44,7 @@ import org.eclipse.jgit.revwalk.RevFlag;
 import org.eclipse.jgit.revwalk.RevFlagSet;
 import org.eclipse.jgit.revwalk.RevTag;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Given a commit, show the most recent tag that is reachable from a commit.
@@ -368,6 +369,23 @@ public class DescribeCommand extends GitCommand<String> {
 	 */
 	@Override
 	public String call() throws GitAPIException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"describe", "jgit.api.DescribeCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				String result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private String callWithTrace() throws GitAPIException {
 		try {
 			checkCallable();
 			if (target == null) {

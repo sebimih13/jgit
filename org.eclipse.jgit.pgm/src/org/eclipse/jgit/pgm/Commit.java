@@ -37,20 +37,27 @@
  */
 package org.eclipse.jgit.pgm;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import org.eclipse.jgit.api.CommitCommand;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.eclipse.jgit.api.errors.JGitInternalException;
 import org.eclipse.jgit.lib.Constants;
+import org.eclipse.jgit.lib.CommitConfig.CleanupMode;
 import org.eclipse.jgit.lib.Ref;
+import org.eclipse.jgit.lib.PersonIdent;
+import org.eclipse.jgit.lib.RepositoryState;
+import org.eclipse.jgit.lib.UserConfig;
 import org.eclipse.jgit.pgm.internal.CLIText;
 import org.eclipse.jgit.pgm.opt.GpgSignHandler;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.util.RawParseUtils;
+import org.eclipse.jgit.util.SystemReader;
 import org.kohsuke.args4j.Argument;
 import org.kohsuke.args4j.Option;
 
@@ -62,8 +69,11 @@ class Commit extends TextBuiltin {
 	@Option(name = "--author", metaVar = "metaVar_author", usage = "usage_CommitAuthor")
 	private String author;
 
-	@Option(name = "--message", aliases = { "-m" }, metaVar = "metaVar_message", usage = "usage_CommitMessage", required = true)
+	@Option(name = "--message", aliases = { "-m" }, metaVar = "metaVar_message", usage = "usage_CommitMessage")
 	private String message;
+
+	@Option(name = "--no-edit", usage = "usage_commitNoEdit")
+	private boolean noEdit;
 
 	@Option(name = "--only", aliases = { "-o" }, usage = "usage_CommitOnly")
 	private boolean only;
@@ -71,8 +81,28 @@ class Commit extends TextBuiltin {
 	@Option(name = "--all", aliases = { "-a" }, usage = "usage_CommitAll")
 	private boolean all;
 
+	@Option(name = "--allow-empty", usage = "usage_commitAllowEmpty")
+	private boolean allowEmpty;
+
 	@Option(name = "--amend", usage = "usage_CommitAmend")
 	private boolean amend;
+
+	@Option(name = "--allow-empty-message", usage = "usage_commitAllowEmptyMessage")
+	private boolean allowEmptyMessage;
+
+	@Option(name = "--cleanup", metaVar = "metaVar_mode", usage = "usage_commitCleanup")
+	private String cleanup = "default"; //$NON-NLS-1$
+
+	@Option(name = "--verify", usage = "usage_commitVerify")
+	private void verify(boolean verify) {
+		noVerify = !verify;
+	}
+
+	@Option(name = "--no-verify", aliases = { "-n" }, usage = "usage_commitNoVerify")
+	private boolean noVerify;
+
+	@Option(name = "--no-post-rewrite", usage = "usage_noPostRewrite")
+	private boolean noPostRewrite;
 
 	@Option(name = "--gpg-sign", aliases = { "-S" }, forbids = {
 			"--no-gpg-sign" }, handler = GpgSignHandler.class)
@@ -87,9 +117,28 @@ class Commit extends TextBuiltin {
 	@Override
 	protected void run() {
 		try (Git git = new Git(db)) {
-			CommitCommand commitCmd = git.commit();
+			if (message == null && !noEdit) {
+				throw die(CLIText.get().commitMessageOrNoEditRequired);
+			}
+			CleanupMode mode;
+			try {
+				mode = CleanupMode.valueOf(cleanup.toUpperCase(Locale.ROOT));
+			} catch (IllegalArgumentException invalid) {
+				throw die(CLIText.get().invalidCommitCleanupMode);
+			}
+			CommitCommand commitCmd = git.commit().setHookPrefix(invocationPrefix())
+					.setUseNativeMessageCleanup(true).setCleanupMode(mode)
+					.setDefaultClean(false).setAllowEmptyMessage(allowEmptyMessage);
 			if (author != null) {
-				commitCmd.setAuthor(RawParseUtils.parsePersonIdent(author));
+				PersonIdent parsed = RawParseUtils.parsePersonIdent(author);
+				if (parsed == null) {
+					throw die(CLIText.get().malformedAuthor);
+				}
+				commitCmd.setAuthor(new PersonIdent(parsed.getName(), parsed.getEmailAddress()));
+			} else if (!amend && db.getRepositoryState()
+					!= RepositoryState.CHERRY_PICKING_RESOLVED) {
+				UserConfig config = db.getConfig().get(UserConfig.KEY);
+				commitCmd.setAuthor(new PersonIdent(config.getAuthorName(), config.getAuthorEmail()));
 			}
 			if (message != null) {
 				commitCmd.setMessage(message);
@@ -114,7 +163,10 @@ class Commit extends TextBuiltin {
 				}
 			}
 			commitCmd.setAmend(amend);
+			commitCmd.setNoPostRewrite(noPostRewrite);
+			commitCmd.setNoVerify(noVerify);
 			commitCmd.setAll(all);
+			commitCmd.setAllowEmpty(allowEmpty || amend);
 			Ref head = db.exactRef(Constants.HEAD);
 			if (head == null) {
 				throw die(CLIText.get().onBranchToBeBorn);
@@ -142,4 +194,18 @@ class Commit extends TextBuiltin {
 			throw die(e.getMessage(), e);
 		}
 	}
+	private String invocationPrefix() throws IOException {
+		String directory = SystemReader.getInstance().getProperty("user.dir"); //$NON-NLS-1$
+		if (directory == null || db.isBare()) {
+			return ""; //$NON-NLS-1$
+		}
+		var root = db.getWorkTree().getCanonicalFile().toPath();
+		var current = new File(directory).getCanonicalFile().toPath();
+		if (!current.startsWith(root)) {
+			return ""; //$NON-NLS-1$
+		}
+		String prefix = root.relativize(current).toString().replace(File.separatorChar, '/');
+		return prefix.isEmpty() ? prefix : prefix + "/"; //$NON-NLS-1$
+	}
+
 }

@@ -31,6 +31,10 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 
+import org.eclipse.jgit.api.errors.AbortedByHookException;
+import org.eclipse.jgit.api.errors.JGitInternalException;
+import org.eclipse.jgit.hooks.Hooks;
+import org.eclipse.jgit.hooks.PostIndexChangeHook;
 import org.eclipse.jgit.errors.CorruptObjectException;
 import org.eclipse.jgit.errors.IndexReadException;
 import org.eclipse.jgit.errors.LockFailedException;
@@ -739,6 +743,28 @@ public class DirCache {
 	 *             the lock is not held.
 	 */
 	public boolean commit() {
+		return commit(false, false);
+	}
+
+	/**
+	 * Commit this change and notify the post-index-change hook after releasing
+	 * the lock.
+	 *
+	 * @param updatedWorkTree
+	 *            whether unpacking trees updated the working tree
+	 * @param updatedSkipWorkTree
+	 *            whether resetting index entries could change skip-worktree bits
+	 * @return whether the index was committed successfully
+	 * @throws IllegalArgumentException
+	 *             if both indicators are set
+	 * @throws IllegalStateException
+	 *             if the lock is not held
+	 * @since 7.3
+	 */
+	public boolean commit(boolean updatedWorkTree, boolean updatedSkipWorkTree) {
+		if (updatedWorkTree && updatedSkipWorkTree) {
+			throw new IllegalArgumentException();
+		}
 		final LockFile tmp = myLock;
 		requireLocked(tmp);
 		myLock = null;
@@ -746,6 +772,18 @@ public class DirCache {
 			return false;
 		}
 		snapshot = tmp.getCommitSnapshot();
+		if (repository != null) {
+			// A notification's exit status cannot undo the committed index. Run
+			// on every write, including identical bytes, as C Git does.
+			try {
+				Hooks.postIndexChange(repository, updatedWorkTree,
+						updatedSkipWorkTree, System.err, System.err).call();
+			} catch (IOException | AbortedByHookException e) {
+				throw new JGitInternalException(MessageFormat.format(
+						JGitText.get().exceptionCaughtDuringExecutionOfHook,
+						PostIndexChangeHook.NAME), e);
+			}
+		}
 		if (indexChangedListener != null
 				&& !Arrays.equals(readIndexChecksum, writeIndexChecksum)) {
 			indexChangedListener.onIndexChanged(new IndexChangedEvent(true));

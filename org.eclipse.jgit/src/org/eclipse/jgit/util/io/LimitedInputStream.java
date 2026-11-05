@@ -14,6 +14,7 @@ package org.eclipse.jgit.util.io;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Objects;
 
 import org.eclipse.jgit.internal.JGitText;
 
@@ -62,10 +63,12 @@ public abstract class LimitedInputStream extends FilterInputStream {
 	@Override
 	public int read() throws IOException {
 		if (left == 0) {
-			if (in.available() == 0) {
-				return -1;
+			// available() may be zero even when the stream has more data.
+			// Probe the stream to distinguish EOF from exceeding the limit.
+			if (in.read() != -1) {
+				limitExceeded();
 			}
-			limitExceeded();
+			return -1;
 		}
 
 		int result = in.read();
@@ -77,11 +80,15 @@ public abstract class LimitedInputStream extends FilterInputStream {
 
 	@Override
 	public int read(byte[] b, int off, int len) throws IOException {
+		Objects.checkFromIndexSize(off, len, b.length);
+		if (len == 0) {
+			return 0;
+		}
 		if (left == 0) {
-			if (in.available() == 0) {
-				return -1;
+			if (in.read() != -1) {
+				limitExceeded();
 			}
-			limitExceeded();
+			return -1;
 		}
 
 		len = (int) Math.min(len, left);

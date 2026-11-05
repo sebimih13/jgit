@@ -18,19 +18,19 @@ public class CommitAndLogTest extends CLIRepositoryTestCase {
 	@Test
 	public void testCommitAmend() throws Exception {
 		assertArrayEquals(new String[] { // commit
-						"[master 101cffba0364877df1942891eba7f465f628a3d2] first comit", //
+						"[master f3302078f263ac8b13d4c8915c573bcba8a1d079] first comit", //
 						"", // amend
-						"[master d2169869dadf16549be20dcf8c207349d2ed6c62] first commit", //
+						"[master cfa4bb45b176389bd90a2aea0128c67dae7852a5] first commit", //
 						"", // log
-						"commit d2169869dadf16549be20dcf8c207349d2ed6c62", //
-						"Author: GIT_COMMITTER_NAME <GIT_COMMITTER_EMAIL>", //
+						"commit cfa4bb45b176389bd90a2aea0128c67dae7852a5", //
+						"Author: GIT_AUTHOR_NAME <GIT_AUTHOR_EMAIL>", //
 						"Date:   Sat Aug 15 20:12:58 2009 -0330", //
 						"", //
 						"    first commit", //
 						"", //
 						"" //
-				}, execute("git commit -m 'first comit'", //
-						"git commit --amend -m 'first commit'", //
+				}, execute("git commit --allow-empty -m 'first comit'", //
+						"git commit --allow-empty --amend -m 'first commit'", //
 						"git log"));
 	}
 }

@@ -35,6 +35,7 @@ import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.lib.StoredConfig;
 import org.eclipse.jgit.revwalk.RevCommit;
 import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.util.Trace2;
 
 /**
  * Used to delete one or several branches.
@@ -69,6 +70,24 @@ public class DeleteBranchCommand extends GitCommand<List<String>> {
 
 	@Override
 	public List<String> call() throws GitAPIException,
+			NotMergedException, CannotDeleteCurrentBranchException {
+		try (Trace2.Scope trace = Trace2.getInstance().command(repo,
+				"branch", "jgit.api.DeleteBranchCommand")) { //$NON-NLS-1$ //$NON-NLS-2$
+			boolean returned = false;
+			try {
+				List<String> result = callWithTrace();
+				returned = true;
+				return result;
+			} catch (Throwable failure) {
+				trace.failure(failure);
+				throw failure;
+			} finally {
+				trace.data("completion", returned ? "returned" : "threw"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			}
+		}
+	}
+
+	private List<String> callWithTrace() throws GitAPIException,
 			NotMergedException, CannotDeleteCurrentBranchException {
 		checkCallable();
 		List<String> result = new ArrayList<>();
